@@ -340,29 +340,72 @@ class MDAnalysis {
             frame.map((val, i) => val - meanCoords[i])
         );
 
-        const covarianceMatrix = [];
-        const sampleSize = Math.min(numCoords, 100);
-        
-        for (let i = 0; i < sampleSize; i++) {
-            covarianceMatrix[i] = [];
-            for (let j = 0; j < sampleSize; j++) {
-                let sum = 0;
-                for (let f = 0; f < numFrames; f++) {
-                    sum += centered[f][i] * centered[f][j];
+        let eigenvalues, eigenvectors;
+        const maxFullPCA = 300;
+
+        if (numCoords <= maxFullPCA) {
+            const covarianceMatrix = [];
+            for (let i = 0; i < numCoords; i++) {
+                covarianceMatrix[i] = [];
+                for (let j = 0; j < numCoords; j++) {
+                    let sum = 0;
+                    for (let f = 0; f < numFrames; f++) {
+                        sum += centered[f][i] * centered[f][j];
+                    }
+                    covarianceMatrix[i][j] = sum / (numFrames - 1);
                 }
-                covarianceMatrix[i][j] = sum / (numFrames - 1);
+            }
+            const pcaResult = this.powerIterationPCA(covarianceMatrix, Math.min(10, numCoords));
+            eigenvalues = pcaResult.eigenvalues;
+            eigenvectors = pcaResult.eigenvectors;
+        } else {
+            const innerProduct = [];
+            for (let i = 0; i < numFrames; i++) {
+                innerProduct[i] = [];
+                for (let j = 0; j < numFrames; j++) {
+                    let sum = 0;
+                    for (let k = 0; k < numCoords; k++) {
+                        sum += centered[i][k] * centered[j][k];
+                    }
+                    innerProduct[i][j] = sum / (numFrames - 1);
+                }
+            }
+            const innerPCA = this.powerIterationPCA(innerProduct, Math.min(10, numFrames));
+            
+            eigenvalues = innerPCA.eigenvalues.map(v => v);
+            eigenvectors = [];
+            
+            const numPCs = innerPCA.eigenvectors.length;
+            for (let p = 0; p < numPCs; p++) {
+                const ev = innerPCA.eigenvectors[p];
+                const eigVal = Math.max(eigenvalues[p], 1e-10);
+                const factor = 1.0 / Math.sqrt((numFrames - 1) * eigVal);
+                const fullEV = new Array(numCoords).fill(0);
+                for (let f = 0; f < numFrames; f++) {
+                    const coef = ev[f] * factor;
+                    for (let k = 0; k < numCoords; k++) {
+                        fullEV[k] += coef * centered[f][k];
+                    }
+                }
+                let norm = 0;
+                for (let k = 0; k < numCoords; k++) norm += fullEV[k] * fullEV[k];
+                norm = Math.sqrt(norm);
+                if (norm > 0) {
+                    for (let k = 0; k < numCoords; k++) fullEV[k] /= norm;
+                }
+                eigenvectors.push(fullEV);
             }
         }
-
-        const { eigenvalues, eigenvectors } = this.powerIterationPCA(covarianceMatrix, Math.min(10, sampleSize));
 
         const projections = [];
         for (let f = 0; f < numFrames; f++) {
             const proj = [];
-            for (let p = 0; p < eigenvalues.length; p++) {
+            for (let p = 0; p < eigenvectors.length; p++) {
                 let sum = 0;
-                for (let i = 0; i < sampleSize; i++) {
-                    sum += centered[f][i] * eigenvectors[p][i];
+                const ev = eigenvectors[p];
+                const minLen = Math.min(ev.length, centered[f].length);
+                for (let i = 0; i < minLen; i++) {
+                    sum += centered[f][i] * ev[i];
                 }
                 proj.push(sum);
             }
@@ -386,7 +429,7 @@ class MDAnalysis {
         return { eigenvalues, eigenvectors, projections, varianceExplained };
     }
 
-    generatePCModeFrames(pcIndex, numFrames = 20, amplitude = 3.0) {
+    generatePCModeFrames(pcIndex, numFrames = 20, amplitude = 2.0) {
         if (!this.results.pca) {
             this.performPCA('backbone');
         }
@@ -400,20 +443,35 @@ class MDAnalysis {
         const eigenvalue = pca.eigenvalues[pcIndex];
         const eigenvector = eigenvectors[pcIndex];
 
-        const scale = amplitude * Math.sqrt(Math.max(eigenvalue, 0.001));
+        if (!meanCoords || !eigenvector || meanCoords.length < numAtoms * 3 || eigenvector.length < numAtoms * 3) {
+            return null;
+        }
 
+        let maxEVComp = 0;
+        for (let k = 0; k < numAtoms * 3; k++) {
+            const v = Math.abs(eigenvector[k]);
+            if (isFinite(v) && v > maxEVComp) maxEVComp = v;
+        }
+        if (maxEVComp < 1e-10) return null;
+
+        const scale = amplitude / maxEVComp;
         const frames = [];
 
         for (let f = 0; f < numFrames; f++) {
-            const t = (f / (numFrames - 1)) * 2 - 1;
+            const t = Math.sin((f / (numFrames - 1)) * Math.PI * 2) * 0.5;
             const factor = t * scale;
 
             const frameCoords = [];
             for (let i = 0; i < numAtoms; i++) {
                 const baseIdx = i * 3;
-                const x = meanCoords[baseIdx] + factor * eigenvector[baseIdx];
-                const y = meanCoords[baseIdx + 1] + factor * eigenvector[baseIdx + 1];
-                const z = meanCoords[baseIdx + 2] + factor * eigenvector[baseIdx + 2];
+                let x = meanCoords[baseIdx] + factor * eigenvector[baseIdx];
+                let y = meanCoords[baseIdx + 1] + factor * eigenvector[baseIdx + 1];
+                let z = meanCoords[baseIdx + 2] + factor * eigenvector[baseIdx + 2];
+
+                if (!isFinite(x)) x = meanCoords[baseIdx];
+                if (!isFinite(y)) y = meanCoords[baseIdx + 1];
+                if (!isFinite(z)) z = meanCoords[baseIdx + 2];
+
                 frameCoords.push([x, y, z]);
             }
             frames.push(frameCoords);

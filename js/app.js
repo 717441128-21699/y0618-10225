@@ -689,27 +689,42 @@ function runFESAnalysis() {
         const temperature = parseFloat(document.getElementById('fesTemperature').value) || 300;
         
         let xData, yData;
-        
-        if (xAxis === 'custom' || yAxis === 'custom') {
-            if (!customFESData) {
+
+        if (xAxis === 'custom') {
+            if (!customFESData || !customFESData.columns || customFESData.columns.length < 1) {
                 showToast('请先导入自定义数据文件', 'warning');
                 hideLoading();
                 return;
             }
-            xData = customFESData.x;
-            yData = customFESData.y;
+            xData = customFESData.columns[0];
         } else {
             xData = analysis.getReactionCoordinate(xAxis);
+        }
+
+        if (yAxis === 'custom') {
+            if (!customFESData || !customFESData.columns || customFESData.columns.length < 2) {
+                showToast('请先导入包含至少两列的自定义数据文件', 'warning');
+                hideLoading();
+                return;
+            }
+            yData = customFESData.columns[1];
+        } else {
             yData = analysis.getReactionCoordinate(yAxis);
         }
         
-        if (xData.length === 0 || yData.length === 0) {
+        if (!xData || xData.length === 0 || !yData || yData.length === 0) {
             showToast('无法获取反应坐标数据', 'error');
             hideLoading();
             return;
         }
         
         const minLen = Math.min(xData.length, yData.length);
+        if (minLen < 2) {
+            showToast('数据点太少，无法计算自由能面', 'error');
+            hideLoading();
+            return;
+        }
+
         xData = xData.slice(0, minLen);
         yData = yData.slice(0, minLen);
         
@@ -753,8 +768,7 @@ function loadFESData(event) {
     reader.onload = function(e) {
         const content = e.target.result;
         const lines = content.trim().split('\n');
-        const xData = [];
-        const yData = [];
+        const columns = [];
         
         for (const line of lines) {
             const trimmed = line.trim();
@@ -763,28 +777,33 @@ function loadFESData(event) {
             }
             
             const parts = trimmed.split(/[\s,]+/);
-            if (parts.length >= 2) {
-                const x = parseFloat(parts[0]);
-                const y = parseFloat(parts[1]);
-                if (!isNaN(x) && !isNaN(y)) {
-                    xData.push(x);
-                    yData.push(y);
+            const numericParts = parts.map(parseFloat).filter(v => !isNaN(v));
+            if (numericParts.length >= 2) {
+                for (let c = 0; c < numericParts.length; c++) {
+                    if (!columns[c]) columns[c] = [];
+                    columns[c].push(numericParts[c]);
                 }
             }
         }
         
-        if (xData.length > 0) {
-            customFESData = { x: xData, y: yData, fileName: file.name };
-            document.getElementById('fesDataStatus').textContent = `${file.name} (${xData.length} 点)`;
+        if (columns.length >= 1 && columns[0].length > 0) {
+            customFESData = { 
+                columns, 
+                fileName: file.name,
+                numColumns: columns.length,
+                numPoints: columns[0].length
+            };
+            document.getElementById('fesDataStatus').textContent = `${file.name} (${columns[0].length} 点, ${columns.length} 列)`;
             document.getElementById('fesDataStatus').style.color = 'var(--success-color)';
             
-            document.getElementById('fesXAxis').value = 'custom';
-            document.getElementById('fesYAxis').value = 'custom';
-            
-            showToast(`成功导入 ${xData.length} 个数据点`, 'success');
+            showToast(`成功导入 ${columns[0].length} 个数据点, ${columns.length} 列`, 'success');
         } else {
             showToast('未找到有效数据', 'error');
         }
+    };
+    
+    reader.onerror = function() {
+        showToast('文件读取失败', 'error');
     };
     
     reader.readAsText(file);

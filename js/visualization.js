@@ -298,6 +298,10 @@ class MolecularViewer {
     startPCModeAnimation(pcFrames, atomIndices) {
         if (!this.glviewer || !pcFrames || pcFrames.length === 0) return;
 
+        if (this.pcModeActive) {
+            this.stopPCModeAnimation();
+        }
+
         this.pcModeActive = true;
         this.pcFrames = pcFrames;
         this.pcAtomIndices = atomIndices;
@@ -307,10 +311,15 @@ class MolecularViewer {
 
         this.originalCoords = [];
         const model = this.glviewer.getModel();
-        if (model) {
-            const atoms = model.selectedAtoms({});
-            for (let i = 0; i < atoms.length; i++) {
-                this.originalCoords.push([atoms[i].x, atoms[i].y, atoms[i].z]);
+        if (!model) return;
+        const atoms = model.selectedAtoms({});
+        for (let i = 0; i < atoms.length; i++) {
+            this.originalCoords.push([atoms[i].x, atoms[i].y, atoms[i].z]);
+        }
+
+        if (atomIndices) {
+            for (let i = 0; i < atomIndices.length; i++) {
+                if (atomIndices[i] >= atoms.length) return;
             }
         }
 
@@ -318,24 +327,29 @@ class MolecularViewer {
     }
 
     animatePCMode() {
-        if (!this.pcModeActive) return;
+        if (!this.pcModeActive || !this.pcFrames) return;
 
         const frame = this.pcFrames[this.pcFrameIndex];
         if (frame && this.pcAtomIndices) {
             const model = this.glviewer.getModel();
             if (model) {
                 const atoms = model.selectedAtoms({});
+                const numAtoms = atoms.length;
+                const numIndices = this.pcAtomIndices.length;
+                const numCoords = frame.length;
                 
-                for (let i = 0; i < this.pcAtomIndices.length; i++) {
+                for (let i = 0; i < numIndices && i < numCoords; i++) {
                     const atomIdx = this.pcAtomIndices[i];
-                    if (atomIdx < atoms.length && i < frame.length) {
-                        atoms[atomIdx].x = frame[i][0];
-                        atoms[atomIdx].y = frame[i][1];
-                        atoms[atomIdx].z = frame[i][2];
+                    if (atomIdx < numAtoms) {
+                        const c = frame[i];
+                        if (isFinite(c[0]) && isFinite(c[1]) && isFinite(c[2])) {
+                            atoms[atomIdx].x = c[0];
+                            atoms[atomIdx].y = c[1];
+                            atoms[atomIdx].z = c[2];
+                        }
                     }
                 }
                 
-                this.glviewer.updateStyle();
                 this.glviewer.render();
             }
         }
@@ -347,7 +361,7 @@ class MolecularViewer {
             this.pcDirection = 1;
         }
 
-        this.pcAnimationId = setTimeout(() => this.animatePCMode(), 80);
+        this.pcAnimationId = setTimeout(() => this.animatePCMode(), 60);
     }
 
     stopPCModeAnimation() {
@@ -363,17 +377,20 @@ class MolecularViewer {
             if (model) {
                 const atoms = model.selectedAtoms({});
                 for (let i = 0; i < this.originalCoords.length && i < atoms.length; i++) {
-                    atoms[i].x = this.originalCoords[i][0];
-                    atoms[i].y = this.originalCoords[i][1];
-                    atoms[i].z = this.originalCoords[i][2];
+                    const c = this.originalCoords[i];
+                    if (isFinite(c[0]) && isFinite(c[1]) && isFinite(c[2])) {
+                        atoms[i].x = c[0];
+                        atoms[i].y = c[1];
+                        atoms[i].z = c[2];
+                    }
                 }
-                this.glviewer.updateStyle();
                 this.glviewer.render();
             }
         }
 
         this.originalCoords = null;
         this.pcFrames = null;
+        this.pcAtomIndices = null;
     }
 
     addDisplacementArrows(displacements, color = '#ff6b6b') {
@@ -411,7 +428,6 @@ class AnimationController {
         this.viewer = viewer;
         this.trajectory = trajectory;
         this.isPlaying = false;
-        this.currentFrame = 0;
         this.playSpeed = 1;
         this.animationId = null;
         this.onFrameChange = null;
@@ -419,7 +435,9 @@ class AnimationController {
 
     setTrajectory(trajectory) {
         this.trajectory = trajectory;
-        this.currentFrame = 0;
+        if (this.trajectory) {
+            this.trajectory.currentFrame = 0;
+        }
         this.updateView();
     }
 
@@ -433,7 +451,7 @@ class AnimationController {
     pause() {
         this.isPlaying = false;
         if (this.animationId) {
-            cancelAnimationFrame(this.animationId);
+            clearTimeout(this.animationId);
             this.animationId = null;
         }
     }
@@ -462,10 +480,10 @@ class AnimationController {
     nextFrame() {
         if (!this.trajectory) return;
         
-        if (this.currentFrame < this.trajectory.getNumFrames() - 1) {
-            this.currentFrame++;
+        if (this.trajectory.currentFrame < this.trajectory.getNumFrames() - 1) {
+            this.trajectory.currentFrame++;
         } else {
-            this.currentFrame = 0;
+            this.trajectory.currentFrame = 0;
         }
         this.updateView();
     }
@@ -473,10 +491,10 @@ class AnimationController {
     previousFrame() {
         if (!this.trajectory) return;
         
-        if (this.currentFrame > 0) {
-            this.currentFrame--;
+        if (this.trajectory.currentFrame > 0) {
+            this.trajectory.currentFrame--;
         } else {
-            this.currentFrame = this.trajectory.getNumFrames() - 1;
+            this.trajectory.currentFrame = this.trajectory.getNumFrames() - 1;
         }
         this.updateView();
     }
@@ -485,20 +503,20 @@ class AnimationController {
         if (!this.trajectory) return;
         
         frameIndex = Math.max(0, Math.min(this.trajectory.getNumFrames() - 1, parseInt(frameIndex)));
-        this.currentFrame = frameIndex;
+        this.trajectory.currentFrame = frameIndex;
         this.updateView();
     }
 
     updateView() {
         if (!this.viewer || !this.trajectory) return;
         
-        const coords = this.trajectory.getFrame(this.currentFrame);
+        const coords = this.trajectory.getCurrentFrame();
         if (coords) {
             this.viewer.updateFrame(coords);
         }
         
         if (this.onFrameChange) {
-            this.onFrameChange(this.currentFrame);
+            this.onFrameChange(this.trajectory.currentFrame);
         }
     }
 
@@ -507,7 +525,7 @@ class AnimationController {
     }
 
     getCurrentFrame() {
-        return this.currentFrame;
+        return this.trajectory ? this.trajectory.currentFrame : 0;
     }
 
     getNumFrames() {

@@ -7,15 +7,33 @@ class Trajectory {
         this.playSpeed = 1;
         this.playInterval = null;
         this.timeStep = 0.001;
+        this.keepTopology = false;
     }
 
     setTopology(atoms) {
+        if (this.keepTopology && this.topology) {
+            return;
+        }
         this.topology = {
             atoms: atoms,
             numAtoms: atoms.length,
             residues: this.extractResidues(atoms),
             chains: this.extractChains(atoms)
         };
+    }
+
+    setFramesOnly(frames) {
+        if (!this.topology) {
+            throw new Error('请先加载拓扑文件');
+        }
+        const expectedAtoms = this.topology.numAtoms;
+        for (let i = 0; i < frames.length; i++) {
+            if (frames[i].length !== expectedAtoms) {
+                throw new Error(`第${i}帧原子数(${frames[i].length})与拓扑(${expectedAtoms})不匹配`);
+            }
+        }
+        this.frames = frames;
+        this.currentFrame = 0;
     }
 
     extractResidues(atoms) {
@@ -456,6 +474,15 @@ class Trajectory {
             return 0;
         }
 
+        if (this.topology && this.topology.numAtoms > 0) {
+            if (frames[0] && frames[0].length !== this.topology.numAtoms) {
+                throw new Error(`轨迹原子数(${frames[0].length})与拓扑(${this.topology.numAtoms})不匹配`);
+            }
+            this.frames = frames;
+            this.currentFrame = 0;
+            return { numAtoms: this.topology.numAtoms, numFrames: frames.length };
+        }
+
         this.setTopology(topologyAtoms);
         this.frames = frames;
         this.currentFrame = 0;
@@ -521,6 +548,15 @@ class Trajectory {
 
         if (topologyAtoms.length === 0) {
             return 0;
+        }
+
+        if (this.topology && this.topology.numAtoms > 0) {
+            if (frames[0] && frames[0].length !== this.topology.numAtoms) {
+                throw new Error(`轨迹原子数(${frames[0].length})与拓扑(${this.topology.numAtoms})不匹配`);
+            }
+            this.frames = frames;
+            this.currentFrame = 0;
+            return { numAtoms: this.topology.numAtoms, numFrames: frames.length };
         }
 
         this.setTopology(topologyAtoms);
@@ -649,6 +685,15 @@ class Trajectory {
             throw new Error('未能解析DCD文件');
         }
 
+        if (this.topology && this.topology.numAtoms > 0) {
+            if (frames[0] && frames[0].length !== this.topology.numAtoms) {
+                throw new Error(`轨迹原子数(${frames[0].length})与拓扑(${this.topology.numAtoms})不匹配`);
+            }
+            this.frames = frames;
+            this.currentFrame = 0;
+            return { numAtoms: this.topology.numAtoms, numFrames: frames.length };
+        }
+
         this.setTopology(topologyAtoms);
         this.frames = frames;
         this.currentFrame = 0;
@@ -675,53 +720,53 @@ class Trajectory {
         const frames = [];
         let topologyAtoms = [];
         let firstFrame = true;
+        let totalAtoms = null;
 
         while (offset < view.byteLength - 16) {
             try {
+                const startOffset = offset;
                 const magic = readInt();
+                
                 if (magic !== 1995) {
-                    offset -= 3;
+                    offset = startOffset + 1;
                     continue;
                 }
 
                 const numAtoms = readInt();
+                if (totalAtoms === null) totalAtoms = numAtoms;
+                if (numAtoms <= 0 || numAtoms > 1000000) {
+                    offset = startOffset + 1;
+                    continue;
+                }
+
                 const step = readInt();
                 const time = readFloat();
                 const boxSize = readFloat();
 
                 const compression = readInt();
-                let frameCoords;
 
-                if (compression === 0) {
-                    frameCoords = [];
-                    for (let i = 0; i < numAtoms; i++) {
-                        const x = readFloat();
-                        const y = readFloat();
-                        const z = readFloat();
-                        frameCoords.push([x, y, z]);
-                    }
-                } else {
-                    const minCoord = [readFloat(), readFloat(), readFloat()];
-                    const maxCoord = [readFloat(), readFloat(), readFloat()];
-                    
-                    const smallCount = Math.floor(numAtoms / 3);
-                    const smallValues = [];
-                    for (let i = 0; i < smallCount; i++) {
-                        smallValues.push([readInt(), readInt(), readInt()]);
-                    }
+                if (compression !== 0) {
+                    throw new Error('XTC压缩格式(压缩精度)暂不支持，请使用未压缩的XTC或使用其他格式(如DCD/PDB多帧)');
+                }
 
-                    frameCoords = [];
-                    for (let i = 0; i < numAtoms; i++) {
-                        const x = minCoord[0] + Math.random() * (maxCoord[0] - minCoord[0]);
-                        const y = minCoord[1] + Math.random() * (maxCoord[1] - minCoord[1]);
-                        const z = minCoord[2] + Math.random() * (maxCoord[2] - minCoord[2]);
-                        frameCoords.push([x, y, z]);
+                const frameCoords = [];
+                for (let i = 0; i < numAtoms; i++) {
+                    if (offset + 12 > view.byteLength) {
+                        throw new Error('XTC文件坐标数据不完整');
                     }
+                    const x = readFloat();
+                    const y = readFloat();
+                    const z = readFloat();
+                    frameCoords.push([x, y, z]);
+                }
+
+                if (frameCoords.length !== numAtoms) {
+                    throw new Error('XTC帧坐标数量与声明不一致');
                 }
 
                 frames.push(frameCoords);
 
-                if (firstFrame && numAtoms > 0) {
+                if (firstFrame) {
                     for (let i = 0; i < numAtoms; i++) {
                         topologyAtoms.push({
                             serial: i + 1,
@@ -738,15 +783,27 @@ class Trajectory {
                     firstFrame = false;
                 }
 
-                if (frames.length >= 1000) break;
+                if (frames.length >= 5000) break;
 
             } catch (e) {
+                if (e.message.includes('不支持')) {
+                    throw e;
+                }
                 break;
             }
         }
 
         if (frames.length === 0) {
-            throw new Error('未能解析XTC文件，该压缩格式需要服务端支持');
+            throw new Error('未能从XTC文件中解析出有效帧');
+        }
+
+        if (this.topology && this.topology.numAtoms > 0) {
+            if (frames[0] && frames[0].length !== this.topology.numAtoms) {
+                throw new Error(`轨迹原子数(${frames[0].length})与拓扑(${this.topology.numAtoms})不匹配`);
+            }
+            this.frames = frames;
+            this.currentFrame = 0;
+            return { numAtoms: this.topology.numAtoms, numFrames: frames.length };
         }
 
         this.setTopology(topologyAtoms);
@@ -779,26 +836,36 @@ class Trajectory {
 
         while (offset < view.byteLength - 64) {
             try {
+                const startOffset = offset;
                 const magic = readInt();
                 
                 if (magic !== 1995 && magic !== 1993) {
-                    offset -= 3;
+                    offset = startOffset + 1;
                     continue;
                 }
 
                 const version = readInt();
                 const numAtoms = readInt();
+                
+                if (numAtoms <= 0 || numAtoms > 1000000) {
+                    offset = startOffset + 1;
+                    continue;
+                }
+
                 const step = readInt();
                 const time = readFloat();
                 const lambda = readFloat();
-                
+
                 const hasBox = readInt();
                 if (hasBox) offset += 9 * 4;
-                
+
                 const hasX = readInt();
                 let frameCoords = [];
-                
+
                 if (hasX && numAtoms > 0) {
+                    if (offset + numAtoms * 12 > view.byteLength) {
+                        throw new Error('TRR文件坐标数据不完整');
+                    }
                     for (let i = 0; i < numAtoms; i++) {
                         const x = readFloat() * 10;
                         const y = readFloat() * 10;
@@ -827,14 +894,20 @@ class Trajectory {
                 } else {
                     break;
                 }
-                
-                const hasV = readInt();
-                if (hasV) offset += numAtoms * 12;
-                
-                const hasF = readInt();
-                if (hasF) offset += numAtoms * 12;
 
-                if (frameCount >= 1000) break;
+                const hasV = readInt();
+                if (hasV) {
+                    if (offset + numAtoms * 12 > view.byteLength) break;
+                    offset += numAtoms * 12;
+                }
+
+                const hasF = readInt();
+                if (hasF) {
+                    if (offset + numAtoms * 12 > view.byteLength) break;
+                    offset += numAtoms * 12;
+                }
+
+                if (frameCount >= 5000) break;
 
             } catch (e) {
                 break;
@@ -842,7 +915,16 @@ class Trajectory {
         }
 
         if (frames.length === 0) {
-            throw new Error('未能解析TRR文件');
+            throw new Error('未能从TRR文件中解析出有效帧');
+        }
+
+        if (this.topology && this.topology.numAtoms > 0) {
+            if (frames[0] && frames[0].length !== this.topology.numAtoms) {
+                throw new Error(`轨迹原子数(${frames[0].length})与拓扑(${this.topology.numAtoms})不匹配`);
+            }
+            this.frames = frames;
+            this.currentFrame = 0;
+            return { numAtoms: this.topology.numAtoms, numFrames: frames.length };
         }
 
         this.setTopology(topologyAtoms);
