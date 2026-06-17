@@ -568,101 +568,116 @@ class Trajectory {
 
     async parseDCD(arrayBuffer) {
         const view = new DataView(arrayBuffer);
+        const byteLength = view.byteLength;
+
+        if (byteLength < 100) {
+            throw new Error('DCD文件过小，不是有效的DCD轨迹');
+        }
+
+        const beFirst = view.getInt32(0, false);
+        const leFirst = view.getInt32(0, true);
+        let littleEndian;
+        if (beFirst === 84) {
+            littleEndian = false;
+        } else if (leFirst === 84) {
+            littleEndian = true;
+        } else {
+            throw new Error('DCD文件格式错误：头部块大小不是84，可能不是有效的DCD文件或字节序无法识别');
+        }
+
+        const readInt = (off) => view.getInt32(off, littleEndian);
+        const readFloat = (off) => view.getFloat32(off, littleEndian);
+
         let offset = 0;
 
-        const readInt = () => {
-            const val = view.getInt32(offset, false);
-            offset += 4;
-            return val;
-        };
-
-        const readFloat = () => {
-            const val = view.getFloat32(offset, false);
-            offset += 4;
-            return val;
-        };
-
-        const headerBlockSize = readInt();
-        
-        const magic = String.fromCharCode(
-            view.getUint8(offset), view.getUint8(offset+1),
-            view.getUint8(offset+2), view.getUint8(offset+3)
-        );
-        
-        if (magic !== 'COR ' && magic !== 'CORD') {
-            throw new Error('无效的DCD文件格式');
-        }
+        const blockSize1 = readInt(offset);
         offset += 4;
 
-        const numFrames = readInt();
-        const startFrame = readInt();
-        const stepSize = readInt();
-        for (let i = 0; i < 4; i++) readInt();
-        const numAtoms = readInt();
-        readInt();
-
-        const titleSize = readInt();
-        let title = '';
-        for (let i = 0; i < titleSize && offset < view.byteLength; i++) {
-            title += String.fromCharCode(view.getUint8(offset++));
-        }
-        if (titleSize % 4 !== 0) {
-            offset += (4 - (titleSize % 4));
+        const magic = String.fromCharCode(
+            view.getUint8(offset), view.getUint8(offset + 1),
+            view.getUint8(offset + 2), view.getUint8(offset + 3)
+        );
+        if (magic !== 'CORD') {
+            throw new Error(`DCD文件magic标识错误：期望"CORD"，实际"${magic}"`);
         }
 
-        readInt();
-        readInt();
+        const unitcellPos = offset + 4 + 5 * 4;
+        const unitcell = readInt(unitcellPos);
 
-        const natom = readInt();
-        readInt();
+        offset = 4 + blockSize1;
+        offset += 4;
 
-        const freeAtomsSize = readInt();
-        let numFreeAtoms = 0;
-        if (freeAtomsSize > 0) {
-            numFreeAtoms = freeAtomsSize / 4;
-            offset += freeAtomsSize;
+        const titleBlockSize = readInt(offset);
+        offset = offset + 4 + titleBlockSize + 4;
+
+        const natomsBlockSize = readInt(offset); offset += 4;
+        const natoms = readInt(offset); offset += 4;
+        offset += 4;
+
+        if (natoms <= 0 || natoms > 10000000) {
+            throw new Error(`DCD文件原子数无效: ${natoms}`);
         }
-        readInt();
 
+        const coordBlockData = natoms * 4;
         const frames = [];
         const topologyAtoms = [];
+        let parseError = null;
 
-        for (let f = 0; f < numFrames; f++) {
+        while (offset + 4 <= byteLength) {
             try {
-                const blockSize = readInt();
-                
-                const xCoords = new Array(numAtoms);
-                const yCoords = new Array(numAtoms);
-                const zCoords = new Array(numAtoms);
+                if (unitcell !== 0) {
+                    const ucOpen = readInt(offset);
+                    if (ucOpen !== 48 && ucOpen !== 56 && ucOpen !== 72) {
+                        if (frames.length === 0) {
+                            parseError = `DCD帧数据解析异常（单元晶胞块大小=${ucOpen}）`;
+                        }
+                        break;
+                    }
+                    offset += 4 + ucOpen + 4;
+                }
 
-                for (let i = 0; i < numAtoms; i++) {
-                    xCoords[i] = readFloat();
+                const xCoords = [], yCoords = [], zCoords = [];
+                let ok = true;
+
+                for (let dim = 0; dim < 3; dim++) {
+                    if (offset + 4 > byteLength) { ok = false; break; }
+                    const openSize = readInt(offset); offset += 4;
+                    if (openSize !== coordBlockData) { ok = false; break; }
+                    const arr = dim === 0 ? xCoords : dim === 1 ? yCoords : zCoords;
+                    if (offset + coordBlockData > byteLength) { ok = false; break; }
+                    for (let i = 0; i < natoms; i++) {
+                        arr.push(readFloat(offset)); offset += 4;
+                    }
+                    if (offset + 4 > byteLength) { ok = false; break; }
+                    const closeSize = readInt(offset); offset += 4;
+                    if (closeSize !== coordBlockData) { ok = false; break; }
                 }
-                
-                readInt();
-                readInt();
-                
-                for (let i = 0; i < numAtoms; i++) {
-                    yCoords[i] = readFloat();
+
+                if (!ok) {
+                    if (frames.length === 0) {
+                        parseError = 'DCD帧坐标块大小不匹配，文件可能已损坏';
+                    }
+                    break;
                 }
-                
-                readInt();
-                readInt();
-                
-                for (let i = 0; i < numAtoms; i++) {
-                    zCoords[i] = readFloat();
-                }
-                
-                readInt();
 
                 const frameCoords = [];
-                for (let i = 0; i < numAtoms; i++) {
-                    frameCoords.push([xCoords[i], yCoords[i], zCoords[i]]);
+                for (let i = 0; i < natoms; i++) {
+                    const x = xCoords[i], y = yCoords[i], z = zCoords[i];
+                    if (!isFinite(x) || !isFinite(y) || !isFinite(z)) {
+                        if (frames.length === 0) {
+                            parseError = 'DCD坐标包含非有限数值，可能是字节序或格式错误';
+                        }
+                        ok = false;
+                        break;
+                    }
+                    frameCoords.push([x, y, z]);
                 }
+                if (!ok) break;
+
                 frames.push(frameCoords);
 
-                if (f === 0) {
-                    for (let i = 0; i < numAtoms; i++) {
+                if (frames.length === 1) {
+                    for (let i = 0; i < natoms; i++) {
                         topologyAtoms.push({
                             serial: i + 1,
                             atom: 'C',
@@ -676,17 +691,23 @@ class Trajectory {
                         });
                     }
                 }
+
+                if (frames.length >= 10000) break;
+
             } catch (e) {
+                if (frames.length === 0) {
+                    parseError = e.message;
+                }
                 break;
             }
         }
 
-        if (topologyAtoms.length === 0) {
-            throw new Error('未能解析DCD文件');
+        if (frames.length === 0) {
+            throw new Error(parseError || '未能从DCD文件中解析出有效帧');
         }
 
         if (this.topology && this.topology.numAtoms > 0) {
-            if (frames[0] && frames[0].length !== this.topology.numAtoms) {
+            if (frames[0].length !== this.topology.numAtoms) {
                 throw new Error(`轨迹原子数(${frames[0].length})与拓扑(${this.topology.numAtoms})不匹配`);
             }
             this.frames = frames;
@@ -703,102 +724,108 @@ class Trajectory {
 
     async parseXTC(arrayBuffer) {
         const view = new DataView(arrayBuffer);
-        let offset = 0;
+        const byteLength = view.byteLength;
 
-        const readInt = () => {
-            const val = view.getInt32(offset, false);
-            offset += 4;
-            return val;
-        };
+        if (byteLength < 52) {
+            throw new Error('XTC文件过小，不是有效的XTC轨迹');
+        }
 
-        const readFloat = () => {
-            const val = view.getFloat32(offset, false);
-            offset += 4;
-            return val;
-        };
+        const readInt = (off) => view.getInt32(off, false);
+        const readFloat = (off) => view.getFloat32(off, false);
+
+        const magic = readInt(0);
+        if (magic !== 1995) {
+            throw new Error('XTC文件格式错误：文件头magic number不是1995，该文件可能不是有效的XTC轨迹或已损坏');
+        }
+
+        const numAtoms = readInt(4);
+        if (numAtoms <= 0 || numAtoms > 1000000) {
+            throw new Error(`XTC文件原子数无效: ${numAtoms}`);
+        }
 
         const frames = [];
         let topologyAtoms = [];
         let firstFrame = true;
-        let totalAtoms = null;
+        let offset = 0;
 
-        while (offset < view.byteLength - 16) {
-            try {
-                const startOffset = offset;
-                const magic = readInt();
-                
-                if (magic !== 1995) {
-                    offset = startOffset + 1;
-                    continue;
-                }
+        const headerSize = 4 + 4 + 4 + 4 + 36;
 
-                const numAtoms = readInt();
-                if (totalAtoms === null) totalAtoms = numAtoms;
-                if (numAtoms <= 0 || numAtoms > 1000000) {
-                    offset = startOffset + 1;
-                    continue;
-                }
+        while (offset + headerSize <= byteLength) {
+            const frameMagic = readInt(offset);
+            if (frameMagic !== 1995) break;
 
-                const step = readInt();
-                const time = readFloat();
-                const boxSize = readFloat();
+            const frameNatoms = readInt(offset + 4);
+            if (frameNatoms !== numAtoms) break;
 
-                const compression = readInt();
+            const boxStart = offset + 16;
+            let boxValid = true;
+            for (let b = 0; b < 9; b++) {
+                const bv = readFloat(boxStart + b * 4);
+                if (!isFinite(bv)) { boxValid = false; break; }
+            }
+            if (!boxValid) break;
 
-                if (compression !== 0) {
-                    throw new Error('XTC压缩格式(压缩精度)暂不支持，请使用未压缩的XTC或使用其他格式(如DCD/PDB多帧)');
-                }
+            const coordStart = offset + headerSize;
+            const coordBytes = numAtoms * 3 * 4;
 
-                const frameCoords = [];
-                for (let i = 0; i < numAtoms; i++) {
-                    if (offset + 12 > view.byteLength) {
-                        throw new Error('XTC文件坐标数据不完整');
-                    }
-                    const x = readFloat();
-                    const y = readFloat();
-                    const z = readFloat();
-                    frameCoords.push([x, y, z]);
-                }
-
-                if (frameCoords.length !== numAtoms) {
-                    throw new Error('XTC帧坐标数量与声明不一致');
-                }
-
-                frames.push(frameCoords);
-
-                if (firstFrame) {
-                    for (let i = 0; i < numAtoms; i++) {
-                        topologyAtoms.push({
-                            serial: i + 1,
-                            atom: 'C',
-                            element: 'C',
-                            resn: 'UNK',
-                            chain: 'A',
-                            resi: Math.floor(i / 8) + 1,
-                            x: frameCoords[i][0],
-                            y: frameCoords[i][1],
-                            z: frameCoords[i][2]
-                        });
-                    }
-                    firstFrame = false;
-                }
-
-                if (frames.length >= 5000) break;
-
-            } catch (e) {
-                if (e.message.includes('不支持')) {
-                    throw e;
+            if (coordStart + coordBytes > byteLength) {
+                if (frames.length === 0) {
+                    throw new Error('检测到XTC压缩格式。压缩XTC轨迹（GROMACS默认输出）暂不支持在浏览器端解析，请使用未压缩格式，或先用 gmx trjconv 转换为DCD/PDB多帧格式后再导入。');
                 }
                 break;
             }
+
+            const frameCoords = [];
+            let allFinite = true;
+            for (let i = 0; i < numAtoms; i++) {
+                const base = coordStart + i * 12;
+                const x = readFloat(base);
+                const y = readFloat(base + 4);
+                const z = readFloat(base + 8);
+                if (!isFinite(x) || !isFinite(y) || !isFinite(z) ||
+                    Math.abs(x) > 1e5 || Math.abs(y) > 1e5 || Math.abs(z) > 1e5) {
+                    allFinite = false;
+                    break;
+                }
+                frameCoords.push([x, y, z]);
+            }
+
+            if (!allFinite) {
+                if (frames.length === 0) {
+                    throw new Error('检测到XTC压缩格式。压缩XTC轨迹（GROMACS默认输出）暂不支持在浏览器端解析，请使用未压缩格式，或先用 gmx trjconv 转换为DCD/PDB多帧格式后再导入。');
+                }
+                break;
+            }
+
+            frames.push(frameCoords);
+
+            if (firstFrame) {
+                for (let i = 0; i < numAtoms; i++) {
+                    topologyAtoms.push({
+                        serial: i + 1,
+                        atom: 'C',
+                        element: 'C',
+                        resn: 'UNK',
+                        chain: 'A',
+                        resi: Math.floor(i / 8) + 1,
+                        x: frameCoords[i][0],
+                        y: frameCoords[i][1],
+                        z: frameCoords[i][2]
+                    });
+                }
+                firstFrame = false;
+            }
+
+            offset = coordStart + coordBytes;
+            if (frames.length >= 5000) break;
         }
 
         if (frames.length === 0) {
-            throw new Error('未能从XTC文件中解析出有效帧');
+            throw new Error('未能从XTC文件中解析出有效帧，该文件可能是压缩格式或已损坏');
         }
 
         if (this.topology && this.topology.numAtoms > 0) {
-            if (frames[0] && frames[0].length !== this.topology.numAtoms) {
+            if (frames[0].length !== this.topology.numAtoms) {
                 throw new Error(`轨迹原子数(${frames[0].length})与拓扑(${this.topology.numAtoms})不匹配`);
             }
             this.frames = frames;

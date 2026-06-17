@@ -159,22 +159,44 @@ function loadTopologyFile(file) {
 function loadTrajectoryFile(file) {
     const ext = file.name.split('.').pop().toLowerCase();
     const isBinary = ['xtc', 'dcd', 'trr'].includes(ext);
-    
+
     if (!trajectory.topology) {
         showToast('请先加载拓扑文件', 'warning');
         return;
     }
-    
+
+    const backupFrames = trajectory.frames;
+    const backupFrame = trajectory.currentFrame;
+    const hasPrevTraj = backupFrames && backupFrames.length > 0;
+
+    const restoreTrajectory = () => {
+        trajectory.frames = backupFrames;
+        trajectory.currentFrame = backupFrame;
+        if (hasPrevTraj) {
+            try {
+                const coords = trajectory.getCurrentFrame();
+                if (coords) viewer.updateFrame(coords);
+                animationController.setTrajectory(trajectory);
+                const slider = document.getElementById('frameSlider');
+                if (slider) {
+                    slider.max = trajectory.getNumFrames() - 1;
+                    slider.value = backupFrame;
+                }
+                updateFrameInfo();
+            } catch (e) {}
+        }
+    };
+
     showLoading('加载轨迹文件...');
-    
+
     if (isBinary) {
         const reader = new FileReader();
-        
+
         reader.onload = async function(e) {
             try {
                 const buffer = e.target.result;
                 let result;
-                
+
                 if (ext === 'dcd') {
                     result = await trajectory.parseDCD(buffer);
                 } else if (ext === 'xtc') {
@@ -182,68 +204,78 @@ function loadTrajectoryFile(file) {
                 } else if (ext === 'trr') {
                     result = await trajectory.parseTRR(buffer);
                 }
-                
+
                 if (result && result.numFrames > 0) {
                     const pdbContent = trajectory.generatePDBString(0);
                     viewer.loadPDB(pdbContent);
                     analysis.setTrajectory(trajectory);
                     animationController.setTrajectory(trajectory);
-                    
+
                     updateTrajectoryUI(file.name, result.numFrames);
                     updateInfoBadges();
-                    
+
                     showToast(`轨迹加载成功 (${result.numFrames}帧)`, 'success');
+                } else {
+                    restoreTrajectory();
+                    showToast('轨迹文件未解析出有效帧，已保留之前的数据', 'warning');
                 }
             } catch (err) {
+                restoreTrajectory();
                 showToast(`轨迹加载失败: ${err.message}`, 'error');
             }
-            
+
             hideLoading();
         };
-        
+
         reader.onerror = function() {
+            restoreTrajectory();
             hideLoading();
             showToast('文件读取失败', 'error');
         };
-        
+
         reader.readAsArrayBuffer(file);
     } else {
         const reader = new FileReader();
-        
+
         reader.onload = function(e) {
             try {
                 const content = e.target.result;
                 let result;
-                
+
                 if (ext === 'pdb') {
                     result = trajectory.parseMultiFramePDB(content);
                 } else if (ext === 'xyz') {
                     result = trajectory.parseMultiFrameXYZ(content);
                 }
-                
+
                 if (result && result.numFrames > 0) {
                     const pdbContent = trajectory.generatePDBString(0);
                     viewer.loadPDB(pdbContent);
                     analysis.setTrajectory(trajectory);
                     animationController.setTrajectory(trajectory);
-                    
+
                     updateTrajectoryUI(file.name, result.numFrames);
                     updateInfoBadges();
-                    
+
                     showToast(`轨迹加载成功 (${result.numFrames}帧)`, 'success');
+                } else {
+                    restoreTrajectory();
+                    showToast('轨迹文件未解析出有效帧，已保留之前的数据', 'warning');
                 }
             } catch (err) {
+                restoreTrajectory();
                 showToast(`轨迹加载失败: ${err.message}`, 'error');
             }
-            
+
             hideLoading();
         };
-        
+
         reader.onerror = function() {
+            restoreTrajectory();
             hideLoading();
             showToast('文件读取失败', 'error');
         };
-        
+
         reader.readAsText(file);
     }
 }
@@ -638,29 +670,41 @@ function visualizePCMode(pcIndex) {
         stopPCModeAnimation();
     }
 
+    const btn = document.querySelector(`.pca-controls .btn[data-pc="${pcIndex}"]`);
+
     showLoading(`正在生成 PC${pcIndex} 运动模式...`);
 
     setTimeout(() => {
-        if (!analysis.results.pca) {
-            analysis.performPCA('backbone');
+        try {
+            if (!analysis.results.pca) {
+                analysis.performPCA('backbone');
+            }
+
+            const pcModeData = analysis.generatePCModeFrames(pcIndex - 1, 30, 2.5);
+
+            if (pcModeData && pcModeData.frames && pcModeData.frames.length > 0) {
+                viewer.startPCModeAnimation(pcModeData.frames, pcModeData.atomIndices);
+                currentPCMode = pcIndex;
+
+                document.querySelectorAll('.pca-controls .btn').forEach(b => {
+                    b.classList.remove('active');
+                });
+                if (btn) btn.classList.add('active');
+
+                if (pcModeData.staticMode) {
+                    showToast(`PC${pcIndex}：该轨迹几乎没有构象变化，无法提取有意义的运动模式（结构接近静止）`, 'warning');
+                } else if (pcModeData.lowVariance) {
+                    showToast(`PC${pcIndex} 运动模式已启动（轨迹变化很小，振幅已缩小显示）。再次点击该按钮停止`, 'info');
+                } else {
+                    showToast(`PC${pcIndex} 运动模式已启动，再次点击该按钮停止`, 'success');
+                }
+            } else {
+                showToast('PC模式生成失败：无法计算运动模式，请确认轨迹包含构象变化', 'error');
+            }
+        } catch (e) {
+            showToast(`PC模式生成出错: ${e.message}`, 'error');
         }
 
-        const pcModeData = analysis.generatePCModeFrames(pcIndex - 1, 30, 2.5);
-        
-        if (pcModeData) {
-            viewer.startPCModeAnimation(pcModeData.frames, pcModeData.atomIndices);
-            currentPCMode = pcIndex;
-            
-            document.querySelectorAll('.pca-controls .btn').forEach(btn => {
-                btn.classList.remove('active');
-            });
-            event?.target?.classList.add('active');
-            
-            showToast(`PC${pcIndex} 运动模式已启动，点击再次按钮停止`, 'success');
-        } else {
-            showToast('PC模式生成失败', 'error');
-        }
-        
         hideLoading();
     }, 100);
 }

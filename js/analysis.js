@@ -413,7 +413,14 @@ class MDAnalysis {
         }
 
         const totalVariance = eigenvalues.reduce((a, b) => a + b, 0);
-        const varianceExplained = eigenvalues.map(ev => (ev / totalVariance * 100).toFixed(1));
+        const varianceExplained = eigenvalues.map(ev => totalVariance > 1e-12 ? (ev / totalVariance * 100).toFixed(1) : '0.0');
+
+        let coordScale = 0;
+        for (let i = 0; i < meanCoords.length; i++) {
+            coordScale += meanCoords[i] * meanCoords[i];
+        }
+        coordScale = Math.sqrt(coordScale / Math.max(meanCoords.length, 1));
+        const lowVariance = totalVariance < 1e-6 || (coordScale > 0 && Math.sqrt(totalVariance) < coordScale * 1e-4);
 
         this.results.pca = {
             eigenvalues,
@@ -423,7 +430,9 @@ class MDAnalysis {
             meanCoords,
             selection,
             atomIndices,
-            numAtoms
+            numAtoms,
+            totalVariance,
+            lowVariance
         };
 
         return { eigenvalues, eigenvectors, projections, varianceExplained };
@@ -439,7 +448,7 @@ class MDAnalysis {
             return null;
         }
 
-        const { meanCoords, eigenvectors, atomIndices, numAtoms } = pca;
+        const { meanCoords, eigenvectors, atomIndices, numAtoms, lowVariance } = pca;
         const eigenvalue = pca.eigenvalues[pcIndex];
         const eigenvector = eigenvectors[pcIndex];
 
@@ -452,9 +461,21 @@ class MDAnalysis {
             const v = Math.abs(eigenvector[k]);
             if (isFinite(v) && v > maxEVComp) maxEVComp = v;
         }
-        if (maxEVComp < 1e-10) return null;
 
-        const scale = amplitude / maxEVComp;
+        if (maxEVComp < 1e-10 || !isFinite(maxEVComp)) {
+            return {
+                frames: this.generateStaticFrames(meanCoords, numAtoms, numFrames),
+                atomIndices,
+                numAtoms,
+                eigenvalue: 0,
+                varianceExplained: '0.0',
+                lowVariance: true,
+                staticMode: true
+            };
+        }
+
+        const effectiveAmplitude = lowVariance ? Math.min(amplitude, 0.4) : amplitude;
+        const scale = effectiveAmplitude / maxEVComp;
         const frames = [];
 
         for (let f = 0; f < numFrames; f++) {
@@ -482,8 +503,26 @@ class MDAnalysis {
             atomIndices,
             numAtoms,
             eigenvalue,
-            varianceExplained: pca.varianceExplained[pcIndex]
+            varianceExplained: pca.varianceExplained[pcIndex],
+            lowVariance: !!lowVariance
         };
+    }
+
+    generateStaticFrames(meanCoords, numAtoms, numFrames) {
+        const frames = [];
+        for (let f = 0; f < numFrames; f++) {
+            const frameCoords = [];
+            for (let i = 0; i < numAtoms; i++) {
+                const baseIdx = i * 3;
+                frameCoords.push([
+                    isFinite(meanCoords[baseIdx]) ? meanCoords[baseIdx] : 0,
+                    isFinite(meanCoords[baseIdx + 1]) ? meanCoords[baseIdx + 1] : 0,
+                    isFinite(meanCoords[baseIdx + 2]) ? meanCoords[baseIdx + 2] : 0
+                ]);
+            }
+            frames.push(frameCoords);
+        }
+        return frames;
     }
 
     getPCDisplacementVectors(pcIndex, amplitude = 2.0) {
@@ -535,10 +574,15 @@ class MDAnalysis {
         for (let k = 0; k < numComponents; k++) {
             let vector = new Array(n).fill(0).map(() => Math.random() - 0.5);
             let norm = Math.sqrt(vector.reduce((s, v) => s + v * v, 0));
+            if (norm < 1e-12) {
+                vector = new Array(n).fill(0);
+                vector[0] = 1;
+                norm = 1;
+            }
             vector = vector.map(v => v / norm);
-            
+
             let eigenvalue = 0;
-            
+
             for (let iter = 0; iter < 100; iter++) {
                 const newVector = [];
                 for (let i = 0; i < n; i++) {
@@ -548,16 +592,24 @@ class MDAnalysis {
                     }
                     newVector.push(sum);
                 }
-                
+
                 const newNorm = Math.sqrt(newVector.reduce((s, v) => s + v * v, 0));
+
+                if (newNorm < 1e-12) {
+                    eigenvalue = 0;
+                    vector = new Array(n).fill(0);
+                    vector[k % n] = 1;
+                    break;
+                }
+
                 const newEigenvalue = newNorm;
-                
+
                 if (Math.abs(newEigenvalue - eigenvalue) < 1e-10) {
                     eigenvalue = newEigenvalue;
                     vector = newVector.map(v => v / newNorm);
                     break;
                 }
-                
+
                 eigenvalue = newEigenvalue;
                 vector = newVector.map(v => v / newNorm);
             }
