@@ -87,6 +87,64 @@
                         支持格式: PDB, GRO, XYZ (拓扑); XTC, DCD, TRR, PDB (轨迹)
                     </div>
                     
+                    <div class="trajectory-summary" id="trajectorySummary" style="display:none">
+                        <h4 class="sub-title">轨迹摘要</h4>
+                        <div class="summary-grid">
+                            <div class="summary-item">
+                                <span class="label">格式</span>
+                                <span class="value" id="sumFormat">--</span>
+                            </div>
+                            <div class="summary-item">
+                                <span class="label">原子数</span>
+                                <span class="value" id="sumAtoms">--</span>
+                            </div>
+                            <div class="summary-item">
+                                <span class="label">帧数</span>
+                                <span class="value" id="sumFrames">--</span>
+                            </div>
+                            <div class="summary-item">
+                                <span class="label">时间步长</span>
+                                <span class="value" id="sumTimeStep">--</span>
+                            </div>
+                            <div class="summary-item">
+                                <span class="label">模拟时间</span>
+                                <span class="value" id="sumTotalTime">--</span>
+                            </div>
+                            <div class="summary-item">
+                                <span class="label">晶胞信息</span>
+                                <span class="value" id="sumUnitCell">--</span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="frame-inspector" id="frameInspector" style="display:none">
+                        <h4 class="sub-title">帧检查</h4>
+                        <div class="inspector-grid">
+                            <div class="inspector-item">
+                                <span class="label">帧号</span>
+                                <span class="value" id="insFrameIdx">0 / 0</span>
+                            </div>
+                            <div class="inspector-item">
+                                <span class="label">时间 (ps)</span>
+                                <span class="value" id="insFrameTime">0.000</span>
+                            </div>
+                        </div>
+                        <div class="inspector-atom-sel">
+                            <label>原子:</label>
+                            <select id="inspectorAtomSel" onchange="updateInspectorCoords()">
+                                <option value="0">第 1 个原子</option>
+                            </select>
+                        </div>
+                        <div class="inspector-coords">
+                            <div><span>X (Å):</span> <b id="insCoordX">--</b></div>
+                            <div><span>Y (Å):</span> <b id="insCoordY">--</b></div>
+                            <div><span>Z (Å):</span> <b id="insCoordZ">--</b></div>
+                        </div>
+                        <div class="inspector-rmsd">
+                            <div><span>RMSD (Å):</span> <b id="insRMSD">--</b></div>
+                        </div>
+                    </div>
+                    
                     <div class="file-list" id="fileList" style="display:none">
                         <div class="file-item empty">
                             <span>暂无文件</span>

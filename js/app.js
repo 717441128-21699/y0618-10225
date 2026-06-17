@@ -14,22 +14,37 @@ function initApp() {
     analysis = new MDAnalysis(trajectory);
     chartManager = new ChartManager();
     trajectoryComparison = new TrajectoryComparison();
-    
+
     viewer = new MolecularViewer('viewer');
     animationController = new AnimationController(viewer, trajectory);
-    
+
     animationController.setOnFrameChange(onFrameChange);
-    
+
     chartManager.createRMSDChart('rmsdChart');
     chartManager.createRMSFChart('rmsfChart');
     chartManager.createRDFChart('rdfChart');
     chartManager.createHBondChart('hbondChart');
     chartManager.createPCAChart('pcaChart');
     chartManager.createFESChart('fesChart');
-    
+
+    window.onChartFrameClick = function(chartId, frameIndex) {
+        if (!trajectory || !animationController) return;
+        const maxFrame = trajectory.getNumFrames() - 1;
+        if (frameIndex < 0 || frameIndex > maxFrame) return;
+        animationController.pause();
+        animationController.seekFrame(frameIndex);
+        const playIcon = document.getElementById('playIcon');
+        const pauseIcon = document.getElementById('pauseIcon');
+        if (playIcon) playIcon.style.display = 'block';
+        if (pauseIcon) pauseIcon.style.display = 'none';
+        const slider = document.getElementById('frameSlider');
+        if (slider) slider.value = frameIndex;
+        updateFrameInfo();
+    };
+
     setupFileUpload();
     setupDragAndDrop();
-    
+
     setTimeout(() => {
         if (viewer) {
             viewer.resize();
@@ -211,7 +226,7 @@ function loadTrajectoryFile(file) {
                     analysis.setTrajectory(trajectory);
                     animationController.setTrajectory(trajectory);
 
-                    updateTrajectoryUI(file.name, result.numFrames);
+                    updateTrajectoryUI(file.name, result.numFrames, result.summary);
                     updateInfoBadges();
 
                     showToast(`轨迹加载成功 (${result.numFrames}帧)`, 'success');
@@ -254,7 +269,7 @@ function loadTrajectoryFile(file) {
                     analysis.setTrajectory(trajectory);
                     animationController.setTrajectory(trajectory);
 
-                    updateTrajectoryUI(file.name, result.numFrames);
+                    updateTrajectoryUI(file.name, result.numFrames, result.summary);
                     updateInfoBadges();
 
                     showToast(`轨迹加载成功 (${result.numFrames}帧)`, 'success');
@@ -323,32 +338,125 @@ function updateTopologyUI(fileName) {
     if (fileNameEl) fileNameEl.textContent = fileName;
 }
 
-function updateTrajectoryUI(fileName, numFrames) {
+function updateTrajectoryUI(fileName, numFrames, summary) {
     const placeholder = document.querySelector('#trajectoryUploadArea .upload-placeholder');
     const selected = document.getElementById('trajectorySelected');
     const fileNameEl = document.getElementById('trajectoryFileName');
     const frameCountEl = document.getElementById('trajectoryFrameCount');
-    
+
     if (placeholder) placeholder.style.display = 'none';
     if (selected) selected.style.display = 'flex';
     if (fileNameEl) fileNameEl.textContent = fileName;
     if (frameCountEl) frameCountEl.textContent = `${numFrames} 帧`;
+
+    const sum = summary || trajectory.getSummary();
+    if (sum) {
+        const sumEl = document.getElementById('trajectorySummary');
+        if (sumEl) {
+            sumEl.style.display = 'block';
+            const fmt = document.getElementById('sumFormat');
+            const atoms = document.getElementById('sumAtoms');
+            const frames = document.getElementById('sumFrames');
+            const timeStep = document.getElementById('sumTimeStep');
+            const totalTime = document.getElementById('sumTotalTime');
+            const unitCell = document.getElementById('sumUnitCell');
+            if (fmt) fmt.textContent = sum.format || '--';
+            if (atoms) atoms.textContent = sum.numAtoms != null ? sum.numAtoms.toLocaleString() : '--';
+            if (frames) frames.textContent = sum.numFrames != null ? sum.numFrames.toLocaleString() : '--';
+            if (timeStep) timeStep.textContent = sum.timeStep != null ? `${sum.timeStep} ps` : '--';
+            if (totalTime) totalTime.textContent = sum.numFrames != null && sum.timeStep != null
+                ? `${((sum.numFrames - 1) * sum.timeStep).toFixed(2)} ps` : '--';
+            if (unitCell) unitCell.textContent = sum.hasUnitCell ? '有' : '无';
+        }
+    }
+
+    const insEl = document.getElementById('frameInspector');
+    if (insEl) insEl.style.display = 'block';
+
+    const atomSel = document.getElementById('inspectorAtomSel');
+    if (atomSel && trajectory.topology) {
+        const atoms = trajectory.topology.atoms;
+        const maxAtoms = Math.min(atoms.length, 100);
+        atomSel.innerHTML = '';
+        for (let i = 0; i < maxAtoms; i++) {
+            const a = atoms[i];
+            const label = `${a.serial}. ${a.atom} / ${a.resn}${a.resi}`;
+            const opt = document.createElement('option');
+            opt.value = i.toString();
+            opt.textContent = label;
+            atomSel.appendChild(opt);
+        }
+        if (atoms.length > maxAtoms) {
+            const opt = document.createElement('option');
+            opt.value = (atoms.length - 1).toString();
+            opt.textContent = `末原子 ${atoms[atoms.length - 1].atom}`;
+            atomSel.appendChild(opt);
+        }
+    }
+
+    updateInspectorCoords();
+}
+
+function updateInspectorCoords() {
+    if (!trajectory || !trajectory.frames.length) return;
+    const frameIdx = trajectory.currentFrame;
+    const totalFrames = trajectory.getNumFrames();
+    const frameTime = trajectory.getFrameTime(frameIdx);
+
+    const idxEl = document.getElementById('insFrameIdx');
+    if (idxEl) idxEl.textContent = `${frameIdx + 1} / ${totalFrames}`;
+    const timeEl = document.getElementById('insFrameTime');
+    if (timeEl) timeEl.textContent = frameTime.toFixed(3);
+
+    const atomSel = document.getElementById('inspectorAtomSel');
+    let atomIdx = 0;
+    if (atomSel) atomIdx = parseInt(atomSel.value) || 0;
+    if (atomIdx < 0) atomIdx = 0;
+
+    const coords = trajectory.getCurrentFrame();
+    if (coords && coords[atomIdx]) {
+        const c = coords[atomIdx];
+        const xEl = document.getElementById('insCoordX');
+        const yEl = document.getElementById('insCoordY');
+        const zEl = document.getElementById('insCoordZ');
+        if (xEl) xEl.textContent = isFinite(c[0]) ? c[0].toFixed(3) : 'NaN';
+        if (yEl) yEl.textContent = isFinite(c[1]) ? c[1].toFixed(3) : 'NaN';
+        if (zEl) zEl.textContent = isFinite(c[2]) ? c[2].toFixed(3) : 'NaN';
+    }
+
+    const rmsdEl = document.getElementById('insRMSD');
+    if (rmsdEl) {
+        if (analysis.results.rmsd && analysis.results.rmsd.frameRMSD &&
+            frameIdx < analysis.results.rmsd.frameRMSD.length) {
+            rmsdEl.textContent = analysis.results.rmsd.frameRMSD[frameIdx].toFixed(3);
+        } else {
+            rmsdEl.textContent = '--';
+        }
+    }
 }
 
 function loadSampleData() {
     trajectory.clear();
     const numFrames = trajectory.generateSampleTrajectory(50);
-    
+
     const pdbContent = generatePDBFromTrajectory();
     viewer.loadPDB(pdbContent);
-    
+
     analysis.setTrajectory(trajectory);
     animationController.setTrajectory(trajectory);
-    
+
     updateTopologyUI('sample_protein.pdb');
-    updateTrajectoryUI('sample_trajectory.xtc', numFrames);
+    trajectory.summary = {
+        format: '示例数据 (合成)',
+        numAtoms: trajectory.topology.numAtoms,
+        numFrames: numFrames,
+        timeStep: 0.001,
+        hasUnitCell: false
+    };
+    trajectory.frameTimes = trajectory.frames.map((_, i) => i * 0.001);
+    updateTrajectoryUI('sample_trajectory.xtc', numFrames, trajectory.summary);
     updateInfoBadges();
-    
+
     showToast(`示例数据加载成功 (${numFrames} 帧)`, 'success');
 }
 
@@ -428,6 +536,7 @@ function updateFrameInfo() {
     const current = trajectory ? trajectory.currentFrame + 1 : 0;
     const total = trajectory ? trajectory.getNumFrames() : 0;
     document.getElementById('frameInfo').textContent = `帧: ${current} / ${total}`;
+    updateInspectorCoords();
 }
 
 function togglePlay() {
@@ -529,17 +638,19 @@ function runAnalysis(type) {
 
 function runRMSDAnalysis() {
     showLoading('正在计算 RMSD...');
-    
+
     setTimeout(() => {
         const rmsdValues = analysis.calculateRMSD('backbone', 0);
         chartManager.updateRMSDChart('rmsdChart', rmsdValues);
-        
+
         const stats = analysis.getStatistics(rmsdValues);
         document.getElementById('rmsdAvg').textContent = stats.avg.toFixed(3) + ' Å';
         document.getElementById('rmsdMax').textContent = stats.max.toFixed(3) + ' Å';
         document.getElementById('rmsdFinal').textContent = stats.final.toFixed(3) + ' Å';
         document.getElementById('rmsdFluct').textContent = stats.std.toFixed(3) + ' Å';
-        
+
+        updateInspectorCoords();
+
         hideLoading();
         showToast('RMSD 分析完成', 'success');
     }, 100);

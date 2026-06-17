@@ -8,6 +8,8 @@ class Trajectory {
         this.playInterval = null;
         this.timeStep = 0.001;
         this.keepTopology = false;
+        this.summary = null;
+        this.frameTimes = [];
     }
 
     setTopology(atoms) {
@@ -89,6 +91,26 @@ class Trajectory {
 
     getCurrentFrame() {
         return this.getFrame(this.currentFrame);
+    }
+
+    getFrameTime(index) {
+        const idx = index !== undefined ? index : this.currentFrame;
+        if (this.frameTimes && this.frameTimes[idx] !== undefined) {
+            return this.frameTimes[idx];
+        }
+        return idx * (this.summary?.timeStep || this.timeStep || 0.001);
+    }
+
+    getSummary() {
+        if (this.summary) return this.summary;
+        if (!this.topology) return null;
+        return {
+            format: '内部数据',
+            numAtoms: this.topology.numAtoms,
+            numFrames: this.frames.length,
+            timeStep: this.timeStep,
+            hasUnitCell: false
+        };
     }
 
     nextFrame() {
@@ -474,20 +496,33 @@ class Trajectory {
             return 0;
         }
 
+        const frameTimes = frames.map((_, i) => i * 0.001);
+        const summary = {
+            format: 'PDB多帧',
+            numAtoms: topologyAtoms.length,
+            numFrames: frames.length,
+            timeStep: 0.001,
+            hasUnitCell: false
+        };
+
         if (this.topology && this.topology.numAtoms > 0) {
             if (frames[0] && frames[0].length !== this.topology.numAtoms) {
                 throw new Error(`轨迹原子数(${frames[0].length})与拓扑(${this.topology.numAtoms})不匹配`);
             }
             this.frames = frames;
+            this.frameTimes = frameTimes;
+            this.summary = summary;
             this.currentFrame = 0;
-            return { numAtoms: this.topology.numAtoms, numFrames: frames.length };
+            return { numAtoms: this.topology.numAtoms, numFrames: frames.length, summary };
         }
 
         this.setTopology(topologyAtoms);
         this.frames = frames;
+        this.frameTimes = frameTimes;
+        this.summary = summary;
         this.currentFrame = 0;
 
-        return { numAtoms: topologyAtoms.length, numFrames: frames.length };
+        return { numAtoms: topologyAtoms.length, numFrames: frames.length, summary };
     }
 
     parseMultiFrameXYZ(xyzText) {
@@ -550,20 +585,33 @@ class Trajectory {
             return 0;
         }
 
+        const frameTimes = frames.map((_, i) => i * 0.001);
+        const summary = {
+            format: 'XYZ多帧',
+            numAtoms: topologyAtoms.length,
+            numFrames: frames.length,
+            timeStep: 0.001,
+            hasUnitCell: false
+        };
+
         if (this.topology && this.topology.numAtoms > 0) {
             if (frames[0] && frames[0].length !== this.topology.numAtoms) {
                 throw new Error(`轨迹原子数(${frames[0].length})与拓扑(${this.topology.numAtoms})不匹配`);
             }
             this.frames = frames;
+            this.frameTimes = frameTimes;
+            this.summary = summary;
             this.currentFrame = 0;
-            return { numAtoms: this.topology.numAtoms, numFrames: frames.length };
+            return { numAtoms: this.topology.numAtoms, numFrames: frames.length, summary };
         }
 
         this.setTopology(topologyAtoms);
         this.frames = frames;
+        this.frameTimes = frameTimes;
+        this.summary = summary;
         this.currentFrame = 0;
 
-        return { numAtoms: topologyAtoms.length, numFrames: frames.length };
+        return { numAtoms: topologyAtoms.length, numFrames: frames.length, summary };
     }
 
     async parseDCD(arrayBuffer) {
@@ -587,94 +635,144 @@ class Trajectory {
 
         const readInt = (off) => view.getInt32(off, littleEndian);
         const readFloat = (off) => view.getFloat32(off, littleEndian);
+        const readDouble = (off) => view.getFloat64(off, littleEndian);
 
-        let offset = 0;
-
-        const blockSize1 = readInt(offset);
-        offset += 4;
-
+        const blockSize1 = readInt(0);
         const magic = String.fromCharCode(
-            view.getUint8(offset), view.getUint8(offset + 1),
-            view.getUint8(offset + 2), view.getUint8(offset + 3)
+            view.getUint8(4), view.getUint8(5),
+            view.getUint8(6), view.getUint8(7)
         );
         if (magic !== 'CORD') {
             throw new Error(`DCD文件magic标识错误：期望"CORD"，实际"${magic}"`);
         }
 
-        const unitcellPos = offset + 4 + 5 * 4;
-        const unitcell = readInt(unitcellPos);
-
-        offset = 4 + blockSize1;
-        offset += 4;
+        const numFramesHeader = readInt(8);
+        const charmmVersion = readInt(20);
+        const headerEnd = 4 + blockSize1;
+        if (readInt(headerEnd) !== blockSize1) {
+            throw new Error('DCD文件头部闭合标记与起始不匹配，文件可能损坏');
+        }
+        let offset = headerEnd + 4;
 
         const titleBlockSize = readInt(offset);
         offset = offset + 4 + titleBlockSize + 4;
 
-        const natomsBlockSize = readInt(offset); offset += 4;
-        const natoms = readInt(offset); offset += 4;
-        offset += 4;
+        const natomsBlockSize = readInt(offset);
+        const natoms = readInt(offset + 4);
+        offset = offset + 4 + natomsBlockSize + 4;
 
         if (natoms <= 0 || natoms > 10000000) {
             throw new Error(`DCD文件原子数无效: ${natoms}`);
         }
 
-        const coordBlockData = natoms * 4;
+        const expectedCoordBlock = natoms * 4;
         const frames = [];
         const topologyAtoms = [];
         let parseError = null;
+        let hasUnitCell = false;
+        let totalBoxes = 0;
+        let totalNoBoxes = 0;
+        const frameTimes = [];
+        let frameIdx = 0;
 
         while (offset + 4 <= byteLength) {
             try {
-                if (unitcell !== 0) {
-                    const ucOpen = readInt(offset);
-                    if (ucOpen !== 48 && ucOpen !== 56 && ucOpen !== 72) {
+                const blockStart = offset;
+                const blockSize = readInt(blockStart);
+
+                if (blockSize === 48 || blockSize === 56 || blockSize === 72) {
+                    hasUnitCell = true;
+                    totalBoxes++;
+                    const doubles = blockSize / 8;
+                    const boxData = [];
+                    for (let b = 0; b < doubles && b < 9; b++) {
+                        boxData.push(readDouble(blockStart + 4 + b * 8));
+                    }
+                    if (readInt(blockStart + 4 + blockSize) !== blockSize) {
                         if (frames.length === 0) {
-                            parseError = `DCD帧数据解析异常（单元晶胞块大小=${ucOpen}）`;
+                            parseError = 'DCD晶胞块闭合标记不匹配，文件可能损坏';
                         }
                         break;
                     }
-                    offset += 4 + ucOpen + 4;
+                    offset = blockStart + 4 + blockSize + 4;
+
+                } else if (blockSize === expectedCoordBlock) {
+                    if (frames.length === 0) {
+                        totalNoBoxes++;
+                    }
+                } else {
+                    if (blockSize > 1 && blockSize % 4 === 0 &&
+                        (blockSize <= natoms * 8) &&
+                        frames.length === 0) {
+                        const probe = readFloat(blockStart + 4);
+                        if (isFinite(probe) && Math.abs(probe) < 100000) {
+                            totalNoBoxes++;
+                        } else {
+                            if (frames.length === 0) {
+                                parseError = `DCD帧数据格式不匹配（块大小=${blockSize}, 期望坐标块=${expectedCoordBlock}）`;
+                            }
+                            break;
+                        }
+                    } else {
+                        if (frames.length === 0) {
+                            parseError = `DCD帧数据格式不匹配（块大小=${blockSize}, 期望坐标块=${expectedCoordBlock}）`;
+                        }
+                        break;
+                    }
                 }
 
                 const xCoords = [], yCoords = [], zCoords = [];
-                let ok = true;
+                let dimOk = true;
 
                 for (let dim = 0; dim < 3; dim++) {
-                    if (offset + 4 > byteLength) { ok = false; break; }
-                    const openSize = readInt(offset); offset += 4;
-                    if (openSize !== coordBlockData) { ok = false; break; }
-                    const arr = dim === 0 ? xCoords : dim === 1 ? yCoords : zCoords;
-                    if (offset + coordBlockData > byteLength) { ok = false; break; }
-                    for (let i = 0; i < natoms; i++) {
-                        arr.push(readFloat(offset)); offset += 4;
+                    if (offset + 4 > byteLength) { dimOk = false; break; }
+                    const openSize = readInt(offset);
+                    if (openSize !== expectedCoordBlock) {
+                        dimOk = false;
+                        break;
                     }
-                    if (offset + 4 > byteLength) { ok = false; break; }
-                    const closeSize = readInt(offset); offset += 4;
-                    if (closeSize !== coordBlockData) { ok = false; break; }
+                    const arr = dim === 0 ? xCoords : dim === 1 ? yCoords : zCoords;
+                    if (offset + 4 + expectedCoordBlock + 4 > byteLength) {
+                        dimOk = false;
+                        break;
+                    }
+                    for (let i = 0; i < natoms; i++) {
+                        arr.push(readFloat(offset + 4 + i * 4));
+                    }
+                    const closeSize = readInt(offset + 4 + expectedCoordBlock);
+                    if (closeSize !== expectedCoordBlock) {
+                        dimOk = false;
+                        break;
+                    }
+                    offset = offset + 4 + expectedCoordBlock + 4;
                 }
 
-                if (!ok) {
+                if (!dimOk) {
                     if (frames.length === 0) {
-                        parseError = 'DCD帧坐标块大小不匹配，文件可能已损坏';
+                        parseError = 'DCD坐标块大小不匹配，文件可能已损坏或字节序错误';
                     }
                     break;
                 }
 
                 const frameCoords = [];
+                let coordOk = true;
                 for (let i = 0; i < natoms; i++) {
                     const x = xCoords[i], y = yCoords[i], z = zCoords[i];
-                    if (!isFinite(x) || !isFinite(y) || !isFinite(z)) {
+                    if (!isFinite(x) || !isFinite(y) || !isFinite(z) ||
+                        Math.abs(x) > 1e5 || Math.abs(y) > 1e5 || Math.abs(z) > 1e5) {
                         if (frames.length === 0) {
-                            parseError = 'DCD坐标包含非有限数值，可能是字节序或格式错误';
+                            parseError = 'DCD坐标包含异常值（非有限数或超范围），可能字节序错误';
                         }
-                        ok = false;
+                        coordOk = false;
                         break;
                     }
                     frameCoords.push([x, y, z]);
                 }
-                if (!ok) break;
+                if (!coordOk) break;
 
                 frames.push(frameCoords);
+                frameTimes.push(frameIdx * 0.001);
+                frameIdx++;
 
                 if (frames.length === 1) {
                     for (let i = 0; i < natoms; i++) {
@@ -706,20 +804,35 @@ class Trajectory {
             throw new Error(parseError || '未能从DCD文件中解析出有效帧');
         }
 
+        const summary = {
+            format: 'DCD' + (littleEndian ? ' (小端)' : ' (大端)'),
+            numAtoms: natoms,
+            numFrames: frames.length,
+            numFramesHeader: numFramesHeader,
+            timeStep: 0.001,
+            hasUnitCell: hasUnitCell,
+            charmmVersion: charmmVersion,
+            byteOrder: littleEndian ? 'little-endian' : 'big-endian'
+        };
+
         if (this.topology && this.topology.numAtoms > 0) {
             if (frames[0].length !== this.topology.numAtoms) {
                 throw new Error(`轨迹原子数(${frames[0].length})与拓扑(${this.topology.numAtoms})不匹配`);
             }
             this.frames = frames;
+            this.frameTimes = frameTimes;
+            this.summary = summary;
             this.currentFrame = 0;
-            return { numAtoms: this.topology.numAtoms, numFrames: frames.length };
+            return { numAtoms: this.topology.numAtoms, numFrames: frames.length, summary };
         }
 
         this.setTopology(topologyAtoms);
         this.frames = frames;
+        this.frameTimes = frameTimes;
+        this.summary = summary;
         this.currentFrame = 0;
 
-        return { numAtoms: topologyAtoms.length, numFrames: frames.length };
+        return { numAtoms: topologyAtoms.length, numFrames: frames.length, summary };
     }
 
     async parseXTC(arrayBuffer) {
@@ -824,20 +937,33 @@ class Trajectory {
             throw new Error('未能从XTC文件中解析出有效帧，该文件可能是压缩格式或已损坏');
         }
 
+        const frameTimes = frames.map((_, i) => i * 0.001);
+        const summary = {
+            format: 'XTC (未压缩)',
+            numAtoms: numAtoms,
+            numFrames: frames.length,
+            timeStep: 0.001,
+            hasUnitCell: true
+        };
+
         if (this.topology && this.topology.numAtoms > 0) {
             if (frames[0].length !== this.topology.numAtoms) {
                 throw new Error(`轨迹原子数(${frames[0].length})与拓扑(${this.topology.numAtoms})不匹配`);
             }
             this.frames = frames;
+            this.frameTimes = frameTimes;
+            this.summary = summary;
             this.currentFrame = 0;
-            return { numAtoms: this.topology.numAtoms, numFrames: frames.length };
+            return { numAtoms: this.topology.numAtoms, numFrames: frames.length, summary };
         }
 
         this.setTopology(topologyAtoms);
         this.frames = frames;
+        this.frameTimes = frameTimes;
+        this.summary = summary;
         this.currentFrame = 0;
 
-        return { numAtoms: topologyAtoms.length, numFrames: frames.length };
+        return { numAtoms: topologyAtoms.length, numFrames: frames.length, summary };
     }
 
     async parseTRR(arrayBuffer) {
@@ -945,20 +1071,33 @@ class Trajectory {
             throw new Error('未能从TRR文件中解析出有效帧');
         }
 
+        const frameTimes = frames.map((_, i) => i * 0.001);
+        const summary = {
+            format: 'TRR',
+            numAtoms: frames[0].length,
+            numFrames: frames.length,
+            timeStep: 0.001,
+            hasUnitCell: true
+        };
+
         if (this.topology && this.topology.numAtoms > 0) {
             if (frames[0] && frames[0].length !== this.topology.numAtoms) {
                 throw new Error(`轨迹原子数(${frames[0].length})与拓扑(${this.topology.numAtoms})不匹配`);
             }
             this.frames = frames;
+            this.frameTimes = frameTimes;
+            this.summary = summary;
             this.currentFrame = 0;
-            return { numAtoms: this.topology.numAtoms, numFrames: frames.length };
+            return { numAtoms: this.topology.numAtoms, numFrames: frames.length, summary };
         }
 
         this.setTopology(topologyAtoms);
         this.frames = frames;
+        this.frameTimes = frameTimes;
+        this.summary = summary;
         this.currentFrame = 0;
 
-        return { numAtoms: topologyAtoms.length, numFrames: frames.length };
+        return { numAtoms: topologyAtoms.length, numFrames: frames.length, summary };
     }
 
     generatePDBString(frameIndex = 0) {

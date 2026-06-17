@@ -34,6 +34,11 @@ class ChartManager {
                     intersect: false,
                     mode: 'index'
                 },
+                onClick: (event, elements) => {
+                    if (elements && elements.length > 0 && typeof window.onChartFrameClick === 'function') {
+                        window.onChartFrameClick(canvasId, elements[0].index);
+                    }
+                },
                 plugins: {
                     legend: {
                         display: false
@@ -366,6 +371,11 @@ class ChartManager {
             options: {
                 responsive: true,
                 maintainAspectRatio: false,
+                onClick: (event, elements) => {
+                    if (elements && elements.length > 0 && typeof window.onChartFrameClick === 'function') {
+                        window.onChartFrameClick(canvasId, elements[0].index);
+                    }
+                },
                 plugins: {
                     legend: {
                         display: false
