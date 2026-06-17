@@ -38,13 +38,8 @@ function initApp() {
 }
 
 function setupFileUpload() {
-    const uploadArea = document.getElementById('fileUploadArea');
     const topologyInput = document.getElementById('topologyFile');
     const trajectoryInput = document.getElementById('trajectoryFile');
-    
-    uploadArea.addEventListener('click', () => {
-        topologyInput.click();
-    });
     
     topologyInput.addEventListener('change', (e) => {
         const file = e.target.files[0];
@@ -54,16 +49,32 @@ function setupFileUpload() {
     });
     
     trajectoryInput.addEventListener('change', (e) => {
-        const files = Array.from(e.target.files);
-        files.forEach(file => loadTrajectoryFile(file));
+        const file = e.target.files[0];
+        if (file) {
+            loadTrajectoryFile(file);
+        }
     });
 }
 
 function setupDragAndDrop() {
-    const uploadArea = document.getElementById('fileUploadArea');
+    const topologyArea = document.getElementById('topologyUploadArea');
+    const trajectoryArea = document.getElementById('trajectoryUploadArea');
+    const allAreas = [topologyArea, trajectoryArea];
     
-    ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
-        uploadArea.addEventListener(eventName, preventDefaults, false);
+    allAreas.forEach(area => {
+        if (!area) return;
+        
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+            area.addEventListener(eventName, preventDefaults, false);
+        });
+        
+        ['dragenter', 'dragover'].forEach(eventName => {
+            area.addEventListener(eventName, () => area.classList.add('drag-over'), false);
+        });
+        
+        ['dragleave', 'drop'].forEach(eventName => {
+            area.addEventListener(eventName, () => area.classList.remove('drag-over'), false);
+        });
     });
     
     function preventDefaults(e) {
@@ -71,62 +82,75 @@ function setupDragAndDrop() {
         e.stopPropagation();
     }
     
-    ['dragenter', 'dragover'].forEach(eventName => {
-        uploadArea.addEventListener(eventName, highlight, false);
-    });
-    
-    ['dragleave', 'drop'].forEach(eventName => {
-        uploadArea.addEventListener(eventName, unhighlight, false);
-    });
-    
-    function highlight() {
-        uploadArea.classList.add('drag-over');
-    }
-    
-    function unhighlight() {
-        uploadArea.classList.remove('drag-over');
-    }
-    
-    uploadArea.addEventListener('drop', handleDrop, false);
-    
-    function handleDrop(e) {
-        const dt = e.dataTransfer;
-        const files = Array.from(dt.files);
-        
-        files.forEach(file => {
+    topologyArea.addEventListener('drop', (e) => {
+        const file = e.dataTransfer.files[0];
+        if (file) {
             const ext = file.name.split('.').pop().toLowerCase();
             if (['pdb', 'gro', 'xyz'].includes(ext)) {
                 loadTopologyFile(file);
-            } else if (['xtc', 'dcd', 'trr'].includes(ext)) {
-                loadTrajectoryFile(file);
+            } else {
+                showToast('请将拓扑文件拖到拓扑区域，轨迹文件拖到轨迹区域', 'info');
             }
-        });
-    }
+        }
+    }, false);
+    
+    trajectoryArea.addEventListener('drop', (e) => {
+        const file = e.dataTransfer.files[0];
+        if (file) {
+            loadTrajectoryFile(file);
+        }
+    }, false);
 }
 
 function loadTopologyFile(file) {
     const reader = new FileReader();
     const ext = file.name.split('.').pop().toLowerCase();
     
+    showLoading('加载拓扑文件...');
+    
     reader.onload = function(e) {
         const content = e.target.result;
         
-        trajectory.clear();
+        let result = null;
+        let pdbContent = content;
         
-        if (ext === 'pdb') {
-            trajectory.parsePDB(content);
-            viewer.loadPDB(content);
-        } else if (ext === 'xyz') {
-            trajectory.parseXYZ(content);
-            viewer.loadXYZ(content);
+        try {
+            if (ext === 'pdb') {
+                result = trajectory.parseMultiFramePDB(content);
+                pdbContent = trajectory.generatePDBString(0);
+            } else if (ext === 'xyz') {
+                result = trajectory.parseMultiFrameXYZ(content);
+                pdbContent = trajectory.generatePDBString(0);
+            } else if (ext === 'gro') {
+                result = parseGRO(content);
+                pdbContent = trajectory.generatePDBString(0);
+            }
+            
+            if (result) {
+                viewer.loadPDB(pdbContent);
+                analysis.setTrajectory(trajectory);
+                animationController.setTrajectory(trajectory);
+                
+                updateTopologyUI(file.name);
+                updateInfoBadges();
+                
+                if (result.numFrames > 1) {
+                    updateTrajectoryUI(file.name, result.numFrames);
+                    showToast(`${file.name} 加载成功 (${result.numAtoms}个原子, ${result.numFrames}帧)`, 'success');
+                } else {
+                    showToast(`${file.name} 加载成功 (${result.numAtoms}个原子)`, 'success');
+                }
+            }
+        } catch (err) {
+            showToast(`加载失败: ${err.message}`, 'error');
         }
         
-        analysis.setTrajectory(trajectory);
-        animationController.setTrajectory(trajectory);
-        
-        updateFileList(file.name, 'topology');
-        updateInfoBadges();
-        showToast(`${file.name} 加载成功`, 'success');
+        hideLoading();
+    };
+    
+    reader.onerror = function() {
+        hideLoading();
+        showToast('文件读取失败', 'error');
     };
     
     reader.readAsText(file);
@@ -134,26 +158,149 @@ function loadTopologyFile(file) {
 
 function loadTrajectoryFile(file) {
     const ext = file.name.split('.').pop().toLowerCase();
+    const isBinary = ['xtc', 'dcd', 'trr'].includes(ext);
     
-    if (ext === 'xtc' || ext === 'dcd' || ext === 'trr') {
-        showToast('二进制轨迹文件需要服务端解析，使用示例数据演示', 'info');
+    if (!trajectory.topology) {
+        showToast('请先加载拓扑文件', 'warning');
         return;
     }
     
-    const reader = new FileReader();
-    reader.onload = function(e) {
-        const content = e.target.result;
-        
-        if (ext === 'pdb') {
-            trajectory.parsePDB(content);
-        }
-        
-        updateFileList(file.name, 'trajectory');
-        updateInfoBadges();
-        showToast(`${file.name} 加载成功`, 'success');
-    };
+    showLoading('加载轨迹文件...');
     
-    reader.readAsText(file);
+    if (isBinary) {
+        const reader = new FileReader();
+        
+        reader.onload = async function(e) {
+            try {
+                const buffer = e.target.result;
+                let result;
+                
+                if (ext === 'dcd') {
+                    result = await trajectory.parseDCD(buffer);
+                } else if (ext === 'xtc') {
+                    result = await trajectory.parseXTC(buffer);
+                } else if (ext === 'trr') {
+                    result = await trajectory.parseTRR(buffer);
+                }
+                
+                if (result && result.numFrames > 0) {
+                    const pdbContent = trajectory.generatePDBString(0);
+                    viewer.loadPDB(pdbContent);
+                    analysis.setTrajectory(trajectory);
+                    animationController.setTrajectory(trajectory);
+                    
+                    updateTrajectoryUI(file.name, result.numFrames);
+                    updateInfoBadges();
+                    
+                    showToast(`轨迹加载成功 (${result.numFrames}帧)`, 'success');
+                }
+            } catch (err) {
+                showToast(`轨迹加载失败: ${err.message}`, 'error');
+            }
+            
+            hideLoading();
+        };
+        
+        reader.onerror = function() {
+            hideLoading();
+            showToast('文件读取失败', 'error');
+        };
+        
+        reader.readAsArrayBuffer(file);
+    } else {
+        const reader = new FileReader();
+        
+        reader.onload = function(e) {
+            try {
+                const content = e.target.result;
+                let result;
+                
+                if (ext === 'pdb') {
+                    result = trajectory.parseMultiFramePDB(content);
+                } else if (ext === 'xyz') {
+                    result = trajectory.parseMultiFrameXYZ(content);
+                }
+                
+                if (result && result.numFrames > 0) {
+                    const pdbContent = trajectory.generatePDBString(0);
+                    viewer.loadPDB(pdbContent);
+                    analysis.setTrajectory(trajectory);
+                    animationController.setTrajectory(trajectory);
+                    
+                    updateTrajectoryUI(file.name, result.numFrames);
+                    updateInfoBadges();
+                    
+                    showToast(`轨迹加载成功 (${result.numFrames}帧)`, 'success');
+                }
+            } catch (err) {
+                showToast(`轨迹加载失败: ${err.message}`, 'error');
+            }
+            
+            hideLoading();
+        };
+        
+        reader.onerror = function() {
+            hideLoading();
+            showToast('文件读取失败', 'error');
+        };
+        
+        reader.readAsText(file);
+    }
+}
+
+function parseGRO(groText) {
+    const lines = groText.trim().split('\n');
+    if (lines.length < 3) return null;
+    
+    const numAtoms = parseInt(lines[1].trim());
+    const atoms = [];
+    const coords = [];
+    
+    for (let i = 2; i < 2 + numAtoms && i < lines.length; i++) {
+        const line = lines[i];
+        const resi = parseInt(line.substring(0, 5));
+        const resn = line.substring(5, 10).trim();
+        const atom = line.substring(10, 15).trim();
+        const serial = parseInt(line.substring(15, 20));
+        const x = parseFloat(line.substring(20, 28)) * 10;
+        const y = parseFloat(line.substring(28, 36)) * 10;
+        const z = parseFloat(line.substring(36, 44)) * 10;
+        
+        atoms.push({
+            serial, atom, resn, resi,
+            chain: 'A',
+            element: atom.charAt(0).toUpperCase(),
+            x, y, z
+        });
+        coords.push([x, y, z]);
+    }
+    
+    trajectory.setTopology(atoms);
+    trajectory.addFrame(coords);
+    
+    return { numAtoms: atoms.length, numFrames: 1 };
+}
+
+function updateTopologyUI(fileName) {
+    const placeholder = document.querySelector('#topologyUploadArea .upload-placeholder');
+    const selected = document.getElementById('topologySelected');
+    const fileNameEl = document.getElementById('topologyFileName');
+    
+    if (placeholder) placeholder.style.display = 'none';
+    if (selected) selected.style.display = 'flex';
+    if (fileNameEl) fileNameEl.textContent = fileName;
+}
+
+function updateTrajectoryUI(fileName, numFrames) {
+    const placeholder = document.querySelector('#trajectoryUploadArea .upload-placeholder');
+    const selected = document.getElementById('trajectorySelected');
+    const fileNameEl = document.getElementById('trajectoryFileName');
+    const frameCountEl = document.getElementById('trajectoryFrameCount');
+    
+    if (placeholder) placeholder.style.display = 'none';
+    if (selected) selected.style.display = 'flex';
+    if (fileNameEl) fileNameEl.textContent = fileName;
+    if (frameCountEl) frameCountEl.textContent = `${numFrames} 帧`;
 }
 
 function loadSampleData() {
@@ -166,8 +313,8 @@ function loadSampleData() {
     analysis.setTrajectory(trajectory);
     animationController.setTrajectory(trajectory);
     
-    updateFileList('sample_protein.pdb', 'topology');
-    updateFileList('sample_trajectory.xtc', 'trajectory');
+    updateTopologyUI('sample_protein.pdb');
+    updateTrajectoryUI('sample_trajectory.xtc', numFrames);
     updateInfoBadges();
     
     showToast(`示例数据加载成功 (${numFrames} 帧)`, 'success');
@@ -416,34 +563,29 @@ function runHBondAnalysis() {
         const donorList = donorRes ? donorRes.split(',').map(r => r.trim().toUpperCase()) : null;
         const acceptorList = acceptorRes ? acceptorRes.split(',').map(r => r.trim().toUpperCase()) : null;
         
-        const hbondResults = analysis.analyzeHydrogenBonds(donorList, acceptorList, 3.5, 120);
+        const { pairs, perFrameCounts } = analysis.analyzeHydrogenBonds(donorList, acceptorList, 3.5, 120);
         
-        const numFrames = Math.min(trajectory.getNumFrames(), 50);
-        const hbondCounts = [];
-        for (let i = 0; i < numFrames; i++) {
-            hbondCounts.push(Math.floor(Math.random() * 10) + 5);
-        }
-        chartManager.updateHBondChart('hbondChart', hbondCounts);
+        chartManager.updateHBondChart('hbondChart', perFrameCounts);
         
         const hbondList = document.getElementById('hbondList');
         hbondList.innerHTML = '';
         
-        hbondResults.slice(0, 10).forEach(pair => {
-            const item = document.createElement('div');
-            item.className = 'hbond-item';
-            item.innerHTML = `
-                <span class="hbond-pair">${pair.pairLabel}</span>
-                <span class="hbond-frequency">${pair.frequency}%</span>
-            `;
-            hbondList.appendChild(item);
-        });
-        
-        if (hbondResults.length === 0) {
+        if (pairs.length > 0) {
+            pairs.slice(0, 10).forEach(pair => {
+                const item = document.createElement('div');
+                item.className = 'hbond-item';
+                item.innerHTML = `
+                    <span class="hbond-pair">${pair.pairLabel}</span>
+                    <span class="hbond-frequency">${pair.frequency}%</span>
+                `;
+                hbondList.appendChild(item);
+            });
+        } else {
             hbondList.innerHTML = '<div class="hbond-item"><span style="color: var(--text-muted)">未找到氢键</span></div>';
         }
         
         hideLoading();
-        showToast('氢键分析完成', 'success');
+        showToast(`氢键分析完成，发现 ${pairs.length} 对氢键`, 'success');
     }, 100);
 }
 
@@ -479,32 +621,173 @@ function runPCAnalysis() {
     }, 100);
 }
 
+let currentPCMode = null;
+
 function visualizePCMode(pcIndex) {
-    showToast(`PC${pcIndex} 运动模式可视化中...`, 'info');
+    if (!trajectory || trajectory.getNumFrames() < 3) {
+        showToast('请先加载轨迹数据（至少3帧）', 'info');
+        return;
+    }
+
+    if (currentPCMode === pcIndex) {
+        stopPCModeAnimation();
+        return;
+    }
+
+    if (currentPCMode !== null) {
+        stopPCModeAnimation();
+    }
+
+    showLoading(`正在生成 PC${pcIndex} 运动模式...`);
+
+    setTimeout(() => {
+        if (!analysis.results.pca) {
+            analysis.performPCA('backbone');
+        }
+
+        const pcModeData = analysis.generatePCModeFrames(pcIndex - 1, 30, 2.5);
+        
+        if (pcModeData) {
+            viewer.startPCModeAnimation(pcModeData.frames, pcModeData.atomIndices);
+            currentPCMode = pcIndex;
+            
+            document.querySelectorAll('.pca-controls .btn').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            event?.target?.classList.add('active');
+            
+            showToast(`PC${pcIndex} 运动模式已启动，点击再次按钮停止`, 'success');
+        } else {
+            showToast('PC模式生成失败', 'error');
+        }
+        
+        hideLoading();
+    }, 100);
 }
+
+function stopPCModeAnimation() {
+    if (viewer) {
+        viewer.stopPCModeAnimation();
+    }
+    currentPCMode = null;
+    
+    document.querySelectorAll('.pca-controls .btn').forEach(btn => {
+        btn.classList.remove('active');
+    });
+    
+    showToast('PC模式动画已停止', 'info');
+}
+
+let customFESData = null;
 
 function runFESAnalysis() {
     showLoading('正在计算自由能面...');
     
     setTimeout(() => {
+        const xAxis = document.getElementById('fesXAxis').value;
+        const yAxis = document.getElementById('fesYAxis').value;
         const temperature = parseFloat(document.getElementById('fesTemperature').value) || 300;
         
-        if (!analysis.results.pca) {
-            analysis.performPCA('backbone');
+        let xData, yData;
+        
+        if (xAxis === 'custom' || yAxis === 'custom') {
+            if (!customFESData) {
+                showToast('请先导入自定义数据文件', 'warning');
+                hideLoading();
+                return;
+            }
+            xData = customFESData.x;
+            yData = customFESData.y;
+        } else {
+            xData = analysis.getReactionCoordinate(xAxis);
+            yData = analysis.getReactionCoordinate(yAxis);
         }
         
-        if (analysis.results.pca && analysis.results.pca.projections) {
-            const projections = analysis.results.pca.projections;
-            const pc1 = projections.map(p => p[0]);
-            const pc2 = projections.map(p => p[1]);
-            
-            const { x, y, fes, minFes } = analysis.calculateFreeEnergySurface(pc1, pc2, temperature);
-            chartManager.updateFESChart('fesChart', x, y, fes);
+        if (xData.length === 0 || yData.length === 0) {
+            showToast('无法获取反应坐标数据', 'error');
+            hideLoading();
+            return;
+        }
+        
+        const minLen = Math.min(xData.length, yData.length);
+        xData = xData.slice(0, minLen);
+        yData = yData.slice(0, minLen);
+        
+        const { x, y, fes, minFes } = analysis.calculateFreeEnergySurface(xData, yData, temperature);
+        chartManager.updateFESChart('fesChart', x, y, fes);
+        
+        const fesChart = chartManager.getChart('fesChart');
+        if (fesChart) {
+            fesChart.options.scales.x.title.text = getAxisLabel(xAxis);
+            fesChart.options.scales.y.title.text = getAxisLabel(yAxis);
+            fesChart.update('none');
         }
         
         hideLoading();
         showToast('自由能面计算完成', 'success');
     }, 100);
+}
+
+function getAxisLabel(axis) {
+    const labels = {
+        'pc1': 'PC1',
+        'pc2': 'PC2',
+        'pc3': 'PC3',
+        'rmsd': 'RMSD (Å)',
+        'rg': '回转半径 (Å)',
+        'rmsf': 'RMSF (Å)',
+        'custom': '自定义'
+    };
+    return labels[axis] || axis;
+}
+
+function updateFESAxisLabel() {
+}
+
+function loadFESData(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    
+    const reader = new FileReader();
+    
+    reader.onload = function(e) {
+        const content = e.target.result;
+        const lines = content.trim().split('\n');
+        const xData = [];
+        const yData = [];
+        
+        for (const line of lines) {
+            const trimmed = line.trim();
+            if (trimmed === '' || trimmed.startsWith('#') || trimmed.startsWith('@')) {
+                continue;
+            }
+            
+            const parts = trimmed.split(/[\s,]+/);
+            if (parts.length >= 2) {
+                const x = parseFloat(parts[0]);
+                const y = parseFloat(parts[1]);
+                if (!isNaN(x) && !isNaN(y)) {
+                    xData.push(x);
+                    yData.push(y);
+                }
+            }
+        }
+        
+        if (xData.length > 0) {
+            customFESData = { x: xData, y: yData, fileName: file.name };
+            document.getElementById('fesDataStatus').textContent = `${file.name} (${xData.length} 点)`;
+            document.getElementById('fesDataStatus').style.color = 'var(--success-color)';
+            
+            document.getElementById('fesXAxis').value = 'custom';
+            document.getElementById('fesYAxis').value = 'custom';
+            
+            showToast(`成功导入 ${xData.length} 个数据点`, 'success');
+        } else {
+            showToast('未找到有效数据', 'error');
+        }
+    };
+    
+    reader.readAsText(file);
 }
 
 function calculateFES() {

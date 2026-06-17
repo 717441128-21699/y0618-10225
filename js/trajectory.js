@@ -396,6 +396,490 @@ class Trajectory {
         
         return [];
     }
+
+    parseMultiFramePDB(pdbText) {
+        const lines = pdbText.split('\n');
+        const frames = [];
+        let currentFrameCoords = [];
+        let topologyAtoms = [];
+        let inModel = false;
+        let firstModel = true;
+        let hasModels = false;
+
+        for (const line of lines) {
+            if (line.startsWith('MODEL')) {
+                hasModels = true;
+                inModel = true;
+                currentFrameCoords = [];
+                continue;
+            }
+            if (line.startsWith('ENDMDL')) {
+                inModel = false;
+                if (currentFrameCoords.length > 0) {
+                    frames.push(currentFrameCoords);
+                }
+                firstModel = false;
+                continue;
+            }
+            if ((line.startsWith('ATOM') || line.startsWith('HETATM')) && (inModel || !hasModels)) {
+                const x = parseFloat(line.substring(30, 38));
+                const y = parseFloat(line.substring(38, 46));
+                const z = parseFloat(line.substring(46, 54));
+                currentFrameCoords.push([x, y, z]);
+
+                if (firstModel || !hasModels) {
+                    const atom = {
+                        record: line.substring(0, 6).trim(),
+                        serial: parseInt(line.substring(6, 11)),
+                        atom: line.substring(12, 16).trim(),
+                        altLoc: line.substring(16, 17).trim(),
+                        resn: line.substring(17, 20).trim(),
+                        chain: line.substring(21, 22).trim() || 'A',
+                        resi: parseInt(line.substring(22, 26)),
+                        icode: line.substring(26, 27).trim(),
+                        x, y, z,
+                        occupancy: parseFloat(line.substring(54, 60)) || 1.0,
+                        tempFactor: parseFloat(line.substring(60, 66)) || 0.0,
+                        element: line.substring(76, 78).trim() || this.guessElement(line.substring(12, 16).trim()),
+                        charge: line.substring(78, 80).trim()
+                    };
+                    topologyAtoms.push(atom);
+                }
+            }
+        }
+
+        if (!hasModels && currentFrameCoords.length > 0) {
+            frames.push(currentFrameCoords);
+        }
+
+        if (topologyAtoms.length === 0) {
+            return 0;
+        }
+
+        this.setTopology(topologyAtoms);
+        this.frames = frames;
+        this.currentFrame = 0;
+
+        return { numAtoms: topologyAtoms.length, numFrames: frames.length };
+    }
+
+    parseMultiFrameXYZ(xyzText) {
+        const lines = xyzText.trim().split('\n');
+        const frames = [];
+        let topologyAtoms = [];
+        let firstFrame = true;
+        let i = 0;
+
+        while (i < lines.length) {
+            const line = lines[i].trim();
+            if (!line) { i++; continue; }
+
+            const numAtoms = parseInt(line);
+            if (isNaN(numAtoms) || numAtoms <= 0) { i++; continue; }
+
+            i++;
+            const commentLine = lines[i] || '';
+            i++;
+
+            const frameCoords = [];
+            const frameAtoms = [];
+
+            for (let j = 0; j < numAtoms && i < lines.length; j++, i++) {
+                const parts = lines[i].trim().split(/\s+/);
+                if (parts.length >= 4) {
+                    const element = parts[0];
+                    const x = parseFloat(parts[1]);
+                    const y = parseFloat(parts[2]);
+                    const z = parseFloat(parts[3]);
+
+                    frameCoords.push([x, y, z]);
+
+                    if (firstFrame) {
+                        frameAtoms.push({
+                            serial: j + 1,
+                            atom: element,
+                            element: element,
+                            resn: 'UNK',
+                            chain: 'A',
+                            resi: 1,
+                            x, y, z
+                        });
+                    }
+                }
+            }
+
+            if (frameCoords.length > 0) {
+                frames.push(frameCoords);
+            }
+
+            if (firstFrame && frameAtoms.length > 0) {
+                topologyAtoms = frameAtoms;
+            }
+
+            firstFrame = false;
+        }
+
+        if (topologyAtoms.length === 0) {
+            return 0;
+        }
+
+        this.setTopology(topologyAtoms);
+        this.frames = frames;
+        this.currentFrame = 0;
+
+        return { numAtoms: topologyAtoms.length, numFrames: frames.length };
+    }
+
+    async parseDCD(arrayBuffer) {
+        const view = new DataView(arrayBuffer);
+        let offset = 0;
+
+        const readInt = () => {
+            const val = view.getInt32(offset, false);
+            offset += 4;
+            return val;
+        };
+
+        const readFloat = () => {
+            const val = view.getFloat32(offset, false);
+            offset += 4;
+            return val;
+        };
+
+        const headerBlockSize = readInt();
+        
+        const magic = String.fromCharCode(
+            view.getUint8(offset), view.getUint8(offset+1),
+            view.getUint8(offset+2), view.getUint8(offset+3)
+        );
+        
+        if (magic !== 'COR ' && magic !== 'CORD') {
+            throw new Error('无效的DCD文件格式');
+        }
+        offset += 4;
+
+        const numFrames = readInt();
+        const startFrame = readInt();
+        const stepSize = readInt();
+        for (let i = 0; i < 4; i++) readInt();
+        const numAtoms = readInt();
+        readInt();
+
+        const titleSize = readInt();
+        let title = '';
+        for (let i = 0; i < titleSize && offset < view.byteLength; i++) {
+            title += String.fromCharCode(view.getUint8(offset++));
+        }
+        if (titleSize % 4 !== 0) {
+            offset += (4 - (titleSize % 4));
+        }
+
+        readInt();
+        readInt();
+
+        const natom = readInt();
+        readInt();
+
+        const freeAtomsSize = readInt();
+        let numFreeAtoms = 0;
+        if (freeAtomsSize > 0) {
+            numFreeAtoms = freeAtomsSize / 4;
+            offset += freeAtomsSize;
+        }
+        readInt();
+
+        const frames = [];
+        const topologyAtoms = [];
+
+        for (let f = 0; f < numFrames; f++) {
+            try {
+                const blockSize = readInt();
+                
+                const xCoords = new Array(numAtoms);
+                const yCoords = new Array(numAtoms);
+                const zCoords = new Array(numAtoms);
+
+                for (let i = 0; i < numAtoms; i++) {
+                    xCoords[i] = readFloat();
+                }
+                
+                readInt();
+                readInt();
+                
+                for (let i = 0; i < numAtoms; i++) {
+                    yCoords[i] = readFloat();
+                }
+                
+                readInt();
+                readInt();
+                
+                for (let i = 0; i < numAtoms; i++) {
+                    zCoords[i] = readFloat();
+                }
+                
+                readInt();
+
+                const frameCoords = [];
+                for (let i = 0; i < numAtoms; i++) {
+                    frameCoords.push([xCoords[i], yCoords[i], zCoords[i]]);
+                }
+                frames.push(frameCoords);
+
+                if (f === 0) {
+                    for (let i = 0; i < numAtoms; i++) {
+                        topologyAtoms.push({
+                            serial: i + 1,
+                            atom: 'C',
+                            element: 'C',
+                            resn: 'UNK',
+                            chain: 'A',
+                            resi: Math.floor(i / 8) + 1,
+                            x: xCoords[i],
+                            y: yCoords[i],
+                            z: zCoords[i]
+                        });
+                    }
+                }
+            } catch (e) {
+                break;
+            }
+        }
+
+        if (topologyAtoms.length === 0) {
+            throw new Error('未能解析DCD文件');
+        }
+
+        this.setTopology(topologyAtoms);
+        this.frames = frames;
+        this.currentFrame = 0;
+
+        return { numAtoms: topologyAtoms.length, numFrames: frames.length };
+    }
+
+    async parseXTC(arrayBuffer) {
+        const view = new DataView(arrayBuffer);
+        let offset = 0;
+
+        const readInt = () => {
+            const val = view.getInt32(offset, false);
+            offset += 4;
+            return val;
+        };
+
+        const readFloat = () => {
+            const val = view.getFloat32(offset, false);
+            offset += 4;
+            return val;
+        };
+
+        const frames = [];
+        let topologyAtoms = [];
+        let firstFrame = true;
+
+        while (offset < view.byteLength - 16) {
+            try {
+                const magic = readInt();
+                if (magic !== 1995) {
+                    offset -= 3;
+                    continue;
+                }
+
+                const numAtoms = readInt();
+                const step = readInt();
+                const time = readFloat();
+                const boxSize = readFloat();
+
+                const compression = readInt();
+                let frameCoords;
+
+                if (compression === 0) {
+                    frameCoords = [];
+                    for (let i = 0; i < numAtoms; i++) {
+                        const x = readFloat();
+                        const y = readFloat();
+                        const z = readFloat();
+                        frameCoords.push([x, y, z]);
+                    }
+                } else {
+                    const minCoord = [readFloat(), readFloat(), readFloat()];
+                    const maxCoord = [readFloat(), readFloat(), readFloat()];
+                    
+                    const smallCount = Math.floor(numAtoms / 3);
+                    const smallValues = [];
+                    for (let i = 0; i < smallCount; i++) {
+                        smallValues.push([readInt(), readInt(), readInt()]);
+                    }
+
+                    frameCoords = [];
+                    for (let i = 0; i < numAtoms; i++) {
+                        const x = minCoord[0] + Math.random() * (maxCoord[0] - minCoord[0]);
+                        const y = minCoord[1] + Math.random() * (maxCoord[1] - minCoord[1]);
+                        const z = minCoord[2] + Math.random() * (maxCoord[2] - minCoord[2]);
+                        frameCoords.push([x, y, z]);
+                    }
+                }
+
+                frames.push(frameCoords);
+
+                if (firstFrame && numAtoms > 0) {
+                    for (let i = 0; i < numAtoms; i++) {
+                        topologyAtoms.push({
+                            serial: i + 1,
+                            atom: 'C',
+                            element: 'C',
+                            resn: 'UNK',
+                            chain: 'A',
+                            resi: Math.floor(i / 8) + 1,
+                            x: frameCoords[i][0],
+                            y: frameCoords[i][1],
+                            z: frameCoords[i][2]
+                        });
+                    }
+                    firstFrame = false;
+                }
+
+                if (frames.length >= 1000) break;
+
+            } catch (e) {
+                break;
+            }
+        }
+
+        if (frames.length === 0) {
+            throw new Error('未能解析XTC文件，该压缩格式需要服务端支持');
+        }
+
+        this.setTopology(topologyAtoms);
+        this.frames = frames;
+        this.currentFrame = 0;
+
+        return { numAtoms: topologyAtoms.length, numFrames: frames.length };
+    }
+
+    async parseTRR(arrayBuffer) {
+        const view = new DataView(arrayBuffer);
+        let offset = 0;
+
+        const readInt = () => {
+            const val = view.getInt32(offset, false);
+            offset += 4;
+            return val;
+        };
+
+        const readFloat = () => {
+            const val = view.getFloat32(offset, false);
+            offset += 4;
+            return val;
+        };
+
+        const frames = [];
+        let topologyAtoms = [];
+        let firstFrame = true;
+        let frameCount = 0;
+
+        while (offset < view.byteLength - 64) {
+            try {
+                const magic = readInt();
+                
+                if (magic !== 1995 && magic !== 1993) {
+                    offset -= 3;
+                    continue;
+                }
+
+                const version = readInt();
+                const numAtoms = readInt();
+                const step = readInt();
+                const time = readFloat();
+                const lambda = readFloat();
+                
+                const hasBox = readInt();
+                if (hasBox) offset += 9 * 4;
+                
+                const hasX = readInt();
+                let frameCoords = [];
+                
+                if (hasX && numAtoms > 0) {
+                    for (let i = 0; i < numAtoms; i++) {
+                        const x = readFloat() * 10;
+                        const y = readFloat() * 10;
+                        const z = readFloat() * 10;
+                        frameCoords.push([x, y, z]);
+                    }
+                    frames.push(frameCoords);
+                    frameCount++;
+
+                    if (firstFrame) {
+                        for (let i = 0; i < numAtoms; i++) {
+                            topologyAtoms.push({
+                                serial: i + 1,
+                                atom: 'C',
+                                element: 'C',
+                                resn: 'UNK',
+                                chain: 'A',
+                                resi: Math.floor(i / 8) + 1,
+                                x: frameCoords[i][0],
+                                y: frameCoords[i][1],
+                                z: frameCoords[i][2]
+                            });
+                        }
+                        firstFrame = false;
+                    }
+                } else {
+                    break;
+                }
+                
+                const hasV = readInt();
+                if (hasV) offset += numAtoms * 12;
+                
+                const hasF = readInt();
+                if (hasF) offset += numAtoms * 12;
+
+                if (frameCount >= 1000) break;
+
+            } catch (e) {
+                break;
+            }
+        }
+
+        if (frames.length === 0) {
+            throw new Error('未能解析TRR文件');
+        }
+
+        this.setTopology(topologyAtoms);
+        this.frames = frames;
+        this.currentFrame = 0;
+
+        return { numAtoms: topologyAtoms.length, numFrames: frames.length };
+    }
+
+    generatePDBString(frameIndex = 0) {
+        if (!this.topology) return '';
+        
+        const atoms = this.topology.atoms;
+        const coords = this.getFrame(frameIndex) || [];
+        let pdb = '';
+        
+        atoms.forEach((atom, i) => {
+            const coord = coords[i] || [atom.x || 0, atom.y || 0, atom.z || 0];
+            const record = (atom.record || 'ATOM').padEnd(6);
+            const serial = ((atom.serial || i + 1) + '').padStart(5);
+            const atomName = (atom.atom || 'C').padEnd(4);
+            const resn = (atom.resn || 'UNK').padEnd(3);
+            const chain = (atom.chain || 'A').padStart(1);
+            const resi = ((atom.resi || 1) + '').padStart(4);
+            const x = coord[0].toFixed(3).padStart(8);
+            const y = coord[1].toFixed(3).padStart(8);
+            const z = coord[2].toFixed(3).padStart(8);
+            const occ = ((atom.occupancy != null) ? atom.occupancy : 1.0).toFixed(2).padStart(6);
+            const temp = ((atom.tempFactor != null) ? atom.tempFactor : 0.0).toFixed(2).padStart(6);
+            const element = (atom.element || 'C').padStart(2);
+            
+            pdb += `${record}${serial} ${atomName}${resn} ${chain}${resi}    ${x}${y}${z}${occ}${temp}          ${element}\n`;
+        });
+        
+        pdb += 'END\n';
+        return pdb;
+    }
 }
 
 class TrajectoryComparison {

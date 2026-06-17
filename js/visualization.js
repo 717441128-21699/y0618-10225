@@ -294,6 +294,116 @@ class MolecularViewer {
             this.glviewer.render();
         }
     }
+
+    startPCModeAnimation(pcFrames, atomIndices) {
+        if (!this.glviewer || !pcFrames || pcFrames.length === 0) return;
+
+        this.pcModeActive = true;
+        this.pcFrames = pcFrames;
+        this.pcAtomIndices = atomIndices;
+        this.pcFrameIndex = 0;
+        this.pcDirection = 1;
+        this.pcAnimationId = null;
+
+        this.originalCoords = [];
+        const model = this.glviewer.getModel();
+        if (model) {
+            const atoms = model.selectedAtoms({});
+            for (let i = 0; i < atoms.length; i++) {
+                this.originalCoords.push([atoms[i].x, atoms[i].y, atoms[i].z]);
+            }
+        }
+
+        this.animatePCMode();
+    }
+
+    animatePCMode() {
+        if (!this.pcModeActive) return;
+
+        const frame = this.pcFrames[this.pcFrameIndex];
+        if (frame && this.pcAtomIndices) {
+            const model = this.glviewer.getModel();
+            if (model) {
+                const atoms = model.selectedAtoms({});
+                
+                for (let i = 0; i < this.pcAtomIndices.length; i++) {
+                    const atomIdx = this.pcAtomIndices[i];
+                    if (atomIdx < atoms.length && i < frame.length) {
+                        atoms[atomIdx].x = frame[i][0];
+                        atoms[atomIdx].y = frame[i][1];
+                        atoms[atomIdx].z = frame[i][2];
+                    }
+                }
+                
+                this.glviewer.updateStyle();
+                this.glviewer.render();
+            }
+        }
+
+        this.pcFrameIndex += this.pcDirection;
+        if (this.pcFrameIndex >= this.pcFrames.length - 1) {
+            this.pcDirection = -1;
+        } else if (this.pcFrameIndex <= 0) {
+            this.pcDirection = 1;
+        }
+
+        this.pcAnimationId = setTimeout(() => this.animatePCMode(), 80);
+    }
+
+    stopPCModeAnimation() {
+        this.pcModeActive = false;
+        
+        if (this.pcAnimationId) {
+            clearTimeout(this.pcAnimationId);
+            this.pcAnimationId = null;
+        }
+
+        if (this.originalCoords && this.glviewer) {
+            const model = this.glviewer.getModel();
+            if (model) {
+                const atoms = model.selectedAtoms({});
+                for (let i = 0; i < this.originalCoords.length && i < atoms.length; i++) {
+                    atoms[i].x = this.originalCoords[i][0];
+                    atoms[i].y = this.originalCoords[i][1];
+                    atoms[i].z = this.originalCoords[i][2];
+                }
+                this.glviewer.updateStyle();
+                this.glviewer.render();
+            }
+        }
+
+        this.originalCoords = null;
+        this.pcFrames = null;
+    }
+
+    addDisplacementArrows(displacements, color = '#ff6b6b') {
+        if (!this.glviewer || !displacements) return;
+
+        const step = Math.max(1, Math.floor(displacements.length / 30));
+        
+        for (let i = 0; i < displacements.length; i += step) {
+            const d = displacements[i];
+            const dist = this.distance3D(d.start, d.end);
+            if (dist > 0.1) {
+                this.glviewer.addArrow({
+                    start: { x: d.start[0], y: d.start[1], z: d.start[2] },
+                    end: { x: d.end[0], y: d.end[1], z: d.end[2] },
+                    color: color,
+                    radius: 0.1,
+                    radiusRatio: 1.5
+                });
+            }
+        }
+        
+        this.glviewer.render();
+    }
+
+    distance3D(a, b) {
+        const dx = a[0] - b[0];
+        const dy = a[1] - b[1];
+        const dz = a[2] - b[2];
+        return Math.sqrt(dx * dx + dy * dy + dz * dz);
+    }
 }
 
 class AnimationController {
