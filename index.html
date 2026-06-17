@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>分子动力学轨迹分析工具 - MD Trajectory Analyzer</title>
+    <link rel="stylesheet" href="css/style.css">
+    <script src="https://3dmol.org/build/3Dmol-min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mathjs@11.11.0/lib/browser/math.min.js"></script>
+</head>
+<body>
+    <div class="app-container">
+        <header class="app-header">
+            <div class="logo">
+                <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="3"/>
+                    <circle cx="5" cy="6" r="2"/>
+                    <circle cx="19" cy="6" r="2"/>
+                    <circle cx="5" cy="18" r="2"/>
+                    <circle cx="19" cy="18" r="2"/>
+                    <line x1="12" y1="12" x2="5" y2="6"/>
+                    <line x1="12" y1="12" x2="19" y2="6"/>
+                    <line x1="12" y1="12" x2="5" y2="18"/>
+                    <line x1="12" y1="12" x2="19" y2="18"/>
+                </svg>
+                <span class="logo-text">MD Analyzer</span>
+            </div>
+            <div class="header-actions">
+                <button class="btn btn-secondary" onclick="showHelp()">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="10"/>
+                        <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/>
+                        <line x1="12" y1="17" x2="12.01" y2="17"/>
+                    </svg>
+                    帮助
+                </button>
+            </div>
+        </header>
+
+        <div class="main-content">
+            <aside class="sidebar">
+                <div class="sidebar-section">
+                    <h3 class="section-title">文件导入</h3>
+                    <div class="file-upload-area" id="fileUploadArea">
+                        <input type="file" id="topologyFile" accept=".pdb,.gro,.xyz" style="display:none">
+                        <input type="file" id="trajectoryFile" accept=".xtc,.dcd,.pdb,.xyz,.trr" multiple style="display:none">
+                        <div class="upload-placeholder">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                <polyline points="17 8 12 3 7 8"/>
+                                <line x1="12" y1="3" x2="12" y2="15"/>
+                            </svg>
+                            <p>拖拽文件到此处或点击上传</p>
+                            <p class="upload-hint">支持拓扑文件: PDB, GRO, XYZ<br>支持轨迹文件: XTC, DCD, PDB</p>
+                        </div>
+                    </div>
+                    <div class="file-list" id="fileList">
+                        <div class="file-item empty">
+                            <span>暂无文件</span>
+                        </div>
+                    </div>
+                    <button class="btn btn-primary btn-block" onclick="loadSampleData()">加载示例数据</button>
+                </div>
+
+                <div class="sidebar-section">
+                    <h3 class="section-title">显示模式</h3>
+                    <div class="display-modes">
+                        <button class="mode-btn active" data-mode="cartoon" onclick="setDisplayMode('cartoon')">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+                                <path d="M2 17l10 5 10-5"/>
+                                <path d="M2 12l10 5 10-5"/>
+                            </svg>
+                            卡通
+                        </button>
+                        <button class="mode-btn" data-mode="stick" onclick="setDisplayMode('stick')">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="12" y1="5" x2="12" y2="19"/>
+                                <circle cx="12" cy="5" r="2"/>
+                                <circle cx="12" cy="19" r="2"/>
+                            </svg>
+                            球棍
+                        </button>
+                        <button class="mode-btn" data-mode="sphere" onclick="setDisplayMode('sphere')">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="12" cy="12" r="8"/>
+                                <circle cx="12" cy="12" r="3" fill="currentColor"/>
+                            </svg>
+                            空间填充
+                        </button>
+                        <button class="mode-btn" data-mode="surface" onclick="setDisplayMode('surface')">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M2 12.25c.8-2 2.5-3.5 5-3.5s4.5 2 6 2 3-1 4-1 2 .5 3 2.5"/>
+                                <path d="M2 17.25c.8-2 2.5-3.5 5-3.5s4.5 2 6 2 3-1 4-1 2 .5 3 2.5"/>
+                                <path d="M2 7.25c.8-2 2.5-3.5 5-3.5s4.5 2 6 2 3-1 4-1 2 .5 3 2.5"/>
+                            </svg>
+                            分子表面
+                        </button>
+                        <button class="mode-btn" data-mode="line" onclick="setDisplayMode('line')">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="4" y1="12" x2="20" y2="12"/>
+                                <line x1="4" y1="6" x2="20" y2="6"/>
+                                <line x1="4" y1="18" x2="20" y2="18"/>
+                            </svg>
+                            线框
+                        </button>
+                        <button class="mode-btn" data-mode="cross" onclick="setDisplayMode('cross')">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="12" y1="2" x2="12" y2="22"/>
+                                <line x1="2" y1="12" x2="22" y2="12"/>
+                            </svg>
+                            交叉线
+                        </button>
+                    </div>
+                </div>
+
+                <div class="sidebar-section">
+                    <h3 class="section-title">着色方案</h3>
+                    <div class="color-schemes">
+                        <button class="color-btn active" data-scheme="chain" onclick="setColorScheme('chain')" title="按链着色">
+                            <span class="color-dot" style="background: linear-gradient(135deg, #ff6b6b, #4ecdc4)"></span>
+                            链
+                        </button>
+                        <button class="color-btn" data-scheme="residue" onclick="setColorScheme('residue')" title="按残基类型着色">
+                            <span class="color-dot" style="background: linear-gradient(135deg, #a8e6cf, #ffd3b6)"></span>
+                            残基
+                        </button>
+                        <button class="color-btn" data-scheme="atom" onclick="setColorScheme('atom')" title="按原子类型着色">
+                            <span class="color-dot" style="background: linear-gradient(135deg, #667eea, #764ba2)"></span>
+                            原子
+                        </button>
+                        <button class="color-btn" data-scheme="secondary" onclick="setColorScheme('secondary')" title="按二级结构着色">
+                            <span class="color-dot" style="background: linear-gradient(135deg, #f093fb, #f5576c)"></span>
+                            二级结构
+                        </button>
+                    </div>
+                </div>
+
+                <div class="sidebar-section">
+                    <h3 class="section-title">分析工具</h3>
+                    <div class="analysis-tools">
+                        <button class="tool-btn" onclick="runAnalysis('rmsd')">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+                            </svg>
+                            RMSD 分析
+                        </button>
+                        <button class="tool-btn" onclick="runAnalysis('rmsf')">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M3 3v18h18"/>
+                                <path d="M7 14l4-4 4 4 5-5"/>
+                            </svg>
+                            RMSF 分析
+                        </button>
+                        <button class="tool-btn" onclick="runAnalysis('rdf')">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="12" cy="12" r="3"/>
+                                <circle cx="12" cy="12" r="8"/>
+                                <circle cx="12" cy="12" r="10"/>
+                            </svg>
+                            RDF 分析
+                        </button>
+                        <button class="tool-btn" onclick="runAnalysis('hbond')">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+                                <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                            </svg>
+                            氢键分析
+                        </button>
+                        <button class="tool-btn" onclick="runAnalysis('pca')">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <ellipse cx="12" cy="12" rx="10" ry="5"/>
+                                <line x1="12" y1="7" x2="12" y2="17"/>
+                                <line x1="2" y1="12" x2="22" y2="12"/>
+                            </svg>
+                            PCA 分析
+                        </button>
+                        <button class="tool-btn" onclick="runAnalysis('fes')">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M3 20h18"/>
+                                <path d="M3 15c2 0 2-5 5-5s3 10 6 10 3-10 5-10 2 5 2 5"/>
+                            </svg>
+                            自由能面
+                        </button>
+                    </div>
+                </div>
+
+                <div class="sidebar-section">
+                    <h3 class="section-title">轨迹对比</h3>
+                    <div class="trajectory-compare">
+                        <div class="compare-list" id="compareList">
+                            <div class="compare-item empty">
+                                <span>添加多条轨迹进行对比</span>
+                            </div>
+                        </div>
+                        <button class="btn btn-outline btn-block" onclick="addTrajectoryForComparison()">
+                            + 添加对比轨迹
+                        </button>
+                    </div>
+                </div>
+            </aside>
+
+            <main class="content-area">
+                <div class="viewer-container">
+                    <div id="viewer" class="viewer-3d"></div>
+                    <div class="viewer-controls">
+                        <div class="trajectory-controls">
+                            <button class="ctrl-btn" onclick="previousFrame()" title="上一帧">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polygon points="19 20 9 12 19 4 19 20"/>
+                                    <line x1="5" y1="19" x2="5" y2="5"/>
+                                </svg>
+                            </button>
+                            <button class="ctrl-btn play-btn" id="playBtn" onclick="togglePlay()" title="播放/暂停">
+                                <svg id="playIcon" viewBox="0 0 24 24" fill="currentColor">
+                                    <polygon points="5 3 19 12 5 21 5 3"/>
+                                </svg>
+                                <svg id="pauseIcon" viewBox="0 0 24 24" fill="currentColor" style="display:none">
+                                    <rect x="6" y="4" width="4" height="16"/>
+                                    <rect x="14" y="4" width="4" height="16"/>
+                                </svg>
+                            </button>
+                            <button class="ctrl-btn" onclick="nextFrame()" title="下一帧">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polygon points="5 4 15 12 5 20 5 4"/>
+                                    <line x1="19" y1="5" x2="19" y2="19"/>
+                                </svg>
+                            </button>
+                            <div class="frame-slider">
+                                <input type="range" id="frameSlider" min="0" max="100" value="0" oninput="seekFrame(this.value)">
+                                <span class="frame-info" id="frameInfo">帧: 0 / 0</span>
+                            </div>
+                            <div class="speed-control">
+                                <label>速度:</label>
+                                <select id="playSpeed" onchange="setPlaySpeed(this.value)">
+                                    <option value="0.25">0.25x</option>
+                                    <option value="0.5">0.5x</option>
+                                    <option value="1" selected>1x</option>
+                                    <option value="2">2x</option>
+                                    <option value="4">4x</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="viewer-info">
+                        <span class="info-badge" id="atomCount">原子: 0</span>
+                        <span class="info-badge" id="residueCount">残基: 0</span>
+                        <span class="info-badge" id="frameCount">帧数: 0</span>
+                        <span class="info-badge" id="simulationTime">模拟时间: 0 ns</span>
+                    </div>
+                </div>
+
+                <div class="analysis-panel" id="analysisPanel">
+                    <div class="panel-header">
+                        <h3>分析结果</h3>
+                        <button class="panel-close" onclick="closeAnalysisPanel()">×</button>
+                    </div>
+                    <div class="panel-tabs">
+                        <button class="tab-btn active" data-tab="rmsd" onclick="switchTab('rmsd')">RMSD</button>
+                        <button class="tab-btn" data-tab="rmsf" onclick="switchTab('rmsf')">RMSF</button>
+                        <button class="tab-btn" data-tab="rdf" onclick="switchTab('rdf')">RDF</button>
+                        <button class="tab-btn" data-tab="hbond" onclick="switchTab('hbond')">氢键</button>
+                        <button class="tab-btn" data-tab="pca" onclick="switchTab('pca')">PCA</button>
+                        <button class="tab-btn" data-tab="fes" onclick="switchTab('fes')">自由能面</button>
+                    </div>
+                    <div class="panel-content">
+                        <div class="tab-content active" id="tab-rmsd">
+                            <div class="chart-container">
+                                <canvas id="rmsdChart"></canvas>
+                            </div>
+                            <div class="analysis-stats">
+                                <div class="stat-item">
+                                    <span class="stat-label">平均RMSD</span>
+                                    <span class="stat-value" id="rmsdAvg">--</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">最大RMSD</span>
+                                    <span class="stat-value" id="rmsdMax">--</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">最终RMSD</span>
+                                    <span class="stat-value" id="rmsdFinal">--</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">RMSD波动</span>
+                                    <span class="stat-value" id="rmsdFluct">--</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="tab-content" id="tab-rmsf">
+                            <div class="chart-container">
+                                <canvas id="rmsfChart"></canvas>
+                            </div>
+                            <div class="rmsf-controls">
+                                <label>
+                                    <input type="checkbox" id="rmsfByResidue" checked onchange="updateRMSFChart()">
+                                    按残基显示
+                                </label>
+                            </div>
+                        </div>
+                        <div class="tab-content" id="tab-rdf">
+                            <div class="chart-container">
+                                <canvas id="rdfChart"></canvas>
+                            </div>
+                            <div class="rdf-controls">
+                                <div class="control-group">
+                                    <label>参考原子组:</label>
+                                    <select id="rdfReference">
+                                        <option value="protein">蛋白质</option>
+                                        <option value="water">水分子</option>
+                                        <option value="all">所有原子</option>
+                                    </select>
+                                </div>
+                                <div class="control-group">
+                                    <label>最大距离 (Å):</label>
+                                    <input type="number" id="rdfMaxDist" value="10" min="1" max="30">
+                                </div>
+                                <button class="btn btn-primary btn-sm" onclick="recalculateRDF()">重新计算</button>
+                            </div>
+                        </div>
+                        <div class="tab-content" id="tab-hbond">
+                            <div class="chart-container">
+                                <canvas id="hbondChart"></canvas>
+                            </div>
+                            <div class="hbond-controls">
+                                <div class="control-group">
+                                    <label>供体残基:</label>
+                                    <input type="text" id="hbondDonors" placeholder="如: SER,THR,ASN">
+                                </div>
+                                <div class="control-group">
+                                    <label>受体残基:</label>
+                                    <input type="text" id="hbondAcceptors" placeholder="如: ASP,GLU,HIS">
+                                </div>
+                                <button class="btn btn-primary btn-sm" onclick="analyzeHBonds()">分析氢键</button>
+                            </div>
+                            <div class="hbond-list" id="hbondList"></div>
+                        </div>
+                        <div class="tab-content" id="tab-pca">
+                            <div class="pca-content">
+                                <div class="chart-container">
+                                    <canvas id="pcaChart"></canvas>
+                                </div>
+                                <div class="pca-info">
+                                    <h4>主成分分析结果</h4>
+                                    <div class="variance-explained">
+                                        <div class="variance-item">
+                                            <span class="pc-label">PC1</span>
+                                            <div class="progress-bar">
+                                                <div class="progress-fill" id="pc1Progress" style="width: 0%"></div>
+                                            </div>
+                                            <span class="pc-value" id="pc1Value">--</span>
+                                        </div>
+                                        <div class="variance-item">
+                                            <span class="pc-label">PC2</span>
+                                            <div class="progress-bar">
+                                                <div class="progress-fill" id="pc2Progress" style="width: 0%"></div>
+                                            </div>
+                                            <span class="pc-value" id="pc2Value">--</span>
+                                        </div>
+                                        <div class="variance-item">
+                                            <span class="pc-label">PC3</span>
+                                            <div class="progress-bar">
+                                                <div class="progress-fill" id="pc3Progress" style="width: 0%"></div>
+                                            </div>
+                                            <span class="pc-value" id="pc3Value">--</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="pca-controls">
+                                <button class="btn btn-outline btn-sm" onclick="visualizePCMode(1)">显示PC1运动模式</button>
+                                <button class="btn btn-outline btn-sm" onclick="visualizePCMode(2)">显示PC2运动模式</button>
+                                <button class="btn btn-outline btn-sm" onclick="visualizePCMode(3)">显示PC3运动模式</button>
+                            </div>
+                        </div>
+                        <div class="tab-content" id="tab-fes">
+                            <div class="chart-container">
+                                <canvas id="fesChart"></canvas>
+                            </div>
+                            <div class="fes-controls">
+                                <div class="control-group">
+                                    <label>X轴反应坐标:</label>
+                                    <select id="fesXAxis">
+                                        <option value="pc1">PC1</option>
+                                        <option value="rmsd">RMSD</option>
+                                        <option value="rg">回转半径</option>
+                                    </select>
+                                </div>
+                                <div class="control-group">
+                                    <label>Y轴反应坐标:</label>
+                                    <select id="fesYAxis">
+                                        <option value="pc2">PC2</option>
+                                        <option value="rmsf">RMSF</option>
+                                    </select>
+                                </div>
+                                <div class="control-group">
+                                    <label>温度 (K):</label>
+                                    <input type="number" id="fesTemperature" value="300" min="0" max="1000">
+                                </div>
+                                <button class="btn btn-primary btn-sm" onclick="calculateFES()">计算自由能面</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <div class="modal" id="helpModal" style="display:none">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>使用帮助</h3>
+                <button class="modal-close" onclick="closeHelp()">×</button>
+            </div>
+            <div class="modal-body">
+                <h4>基本操作</h4>
+                <ul>
+                    <li><strong>旋转：</strong>鼠标左键拖动</li>
+                    <li><strong>平移：</strong>鼠标右键拖动或Ctrl+左键</li>
+                    <li><strong>缩放：</strong>鼠标滚轮</li>
+                    <li><strong>选择原子：</strong>点击原子进行选择</li>
+                </ul>
+                <h4>文件格式支持</h4>
+                <ul>
+                    <li><strong>拓扑文件：</strong>PDB, GRO, XYZ</li>
+                    <li><strong>轨迹文件：</strong>XTC, DCD, PDB, XYZ, TRR</li>
+                </ul>
+                <h4>分析功能</h4>
+                <ul>
+                    <li><strong>RMSD：</strong>均方根偏差，衡量结构整体稳定性</li>
+                    <li><strong>RMSF：</strong>均方根涨落，衡量各残基柔性</li>
+                    <li><strong>RDF：</strong>径向分布函数，分析溶剂结构</li>
+                    <li><strong>氢键：</strong>追踪氢键形成与断裂频率</li>
+                    <li><strong>PCA：</strong>主成分分析，提取主要构象运动</li>
+                    <li><strong>自由能面：</strong>从增强采样数据计算自由能</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <script src="js/trajectory.js"></script>
+    <script src="js/analysis.js"></script>
+    <script src="js/visualization.js"></script>
+    <script src="js/charts.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>
